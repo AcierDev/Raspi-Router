@@ -60,8 +60,11 @@ class FBUIManager:
         """Update the current camera image"""
         if image_data:
             try:
-                # Convert bytes to PIL Image
-                self.current_image = Image.open(io.BytesIO(image_data))
+                # Create a fresh BytesIO object
+                image_buffer = io.BytesIO(image_data)
+                # Load the image fully before storing it
+                temp_image = Image.open(image_buffer)
+                self.current_image = temp_image.copy()  # Create a fully loaded copy
                 self.image_timestamp = datetime.now()
                 self.update_status_message("Camera image updated")
             except Exception as e:
@@ -77,30 +80,37 @@ class FBUIManager:
         # Draw border
         self.draw.rectangle([x, y, x + width, y + height], outline=(255, 255, 255))
         
-        if self.current_image:
-            # Resize image to fit the area while maintaining aspect ratio
-            img_copy = self.current_image.copy()
-            img_copy.thumbnail((width - 4, height - 4), Image.Resampling.LANCZOS)
-            
-            # Calculate position to center the image
-            img_x = x + 2 + (width - 4 - img_copy.width) // 2
-            img_y = y + 2 + (height - 4 - img_copy.height) // 2
-            
-            # Paste the image
-            self.image.paste(img_copy, (img_x, img_y))
-            
-            # Draw timestamp if available
-            if self.image_timestamp:
-                timestamp_str = f"Captured: {self.image_timestamp.strftime('%H:%M:%S')}"
-                self.draw.text((x + 5, y + 5), timestamp_str, font=self.font, fill=(255, 255, 0))
+        if self.current_image and self.current_image.mode:  # Check if image is valid
+            try:
+                # Create a copy for resizing to avoid modifying original
+                img_copy = self.current_image.copy()
+                img_copy.thumbnail((width - 4, height - 4), Image.Resampling.LANCZOS)
+                
+                # Calculate position to center the image
+                img_x = x + 2 + (width - 4 - img_copy.width) // 2
+                img_y = y + 2 + (height - 4 - img_copy.height) // 2
+                
+                # Paste the image
+                self.image.paste(img_copy, (img_x, img_y))
+                
+                # Draw timestamp if available
+                if self.image_timestamp:
+                    timestamp_str = f"Captured: {self.image_timestamp.strftime('%H:%M:%S')}"
+                    self.draw.text((x + 5, y + 5), timestamp_str, font=self.font, fill=(255, 255, 0))
+            except Exception as e:
+                print(f"Error drawing camera view: {e}")
+                self._draw_placeholder(x, y, width, height)
         else:
-            # Draw placeholder text
-            text = "No Camera Image"
-            text_bbox = self.draw.textbbox((0, 0), text, font=self.font)
-            text_width = text_bbox[2] - text_bbox[0]
-            text_x = x + (width - text_width) // 2
-            text_y = y + height // 2 - 10
-            self.draw.text((text_x, text_y), text, font=self.font, fill=(128, 128, 128))
+            self._draw_placeholder(x, y, width, height)
+
+    def _draw_placeholder(self, x, y, width, height):
+        """Draw placeholder when no image is available"""
+        text = "No Camera Image"
+        text_bbox = self.draw.textbbox((0, 0), text, font=self.font)
+        text_width = text_bbox[2] - text_bbox[0]
+        text_x = x + (width - text_width) // 2
+        text_y = y + height // 2 - 10
+        self.draw.text((text_x, text_y), text, font=self.font, fill=(128, 128, 128))
 
     def update_display(self, gpio_controller, network_status):
         """Draw the entire UI"""
