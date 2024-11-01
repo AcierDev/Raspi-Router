@@ -1,11 +1,17 @@
+# core/network.py
+
 import socket
 import requests
-import time
 from datetime import datetime, timedelta
 from urllib.parse import urlparse
 import subprocess
+from config import (
+    NETWORK_TIMEOUTS, 
+    IMAGE_URL, 
+    INFERENCE_URL
+)
 
-class NetworkStatus:
+class NetworkManager:
     def __init__(self):
         self.status = {
             'internet': {
@@ -32,20 +38,17 @@ class NetworkStatus:
     def ping_host(self, host):
         """Check if host responds to ping"""
         try:
-            # Use ping with 1 packet and 1 second timeout
             result = subprocess.run(
                 ['ping', '-c', '1', '-W', '1', host],
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
-                universal_newlines=True  # Use text output instead of bytes
+                universal_newlines=True
             )
             
             if result.returncode == 0:
-                # Extract ping time if available
-                output = result.stdout
-                if 'time=' in output:
+                if 'time=' in result.stdout:
                     try:
-                        time_str = output.split('time=')[1].split()[0].replace('ms', '')
+                        time_str = result.stdout.split('time=')[1].split()[0].replace('ms', '')
                         return True, float(time_str)
                     except:
                         return True, None
@@ -55,10 +58,10 @@ class NetworkStatus:
             print(f"Ping error: {e}")
             return False, None
 
-    def check_internet(self, timeout=2):
+    def check_internet(self):
         """Check internet connectivity using Google DNS"""
         try:
-            socket.create_connection(("8.8.8.8", 53), timeout=timeout)
+            socket.create_connection(("8.8.8.8", 53), timeout=NETWORK_TIMEOUTS['connect'])
             self.status['internet']['status'] = 'Connected'
             self.status['internet']['last_success'] = datetime.now()
             return True
@@ -78,9 +81,9 @@ class NetworkStatus:
             print(f"URL parsing error: {e}")
             return None
 
-    def check_camera(self, url):
-        """Check camera connectivity using simple ping"""
-        host = self.extract_ip_from_url(url)
+    def check_camera(self):
+        """Check camera connectivity"""
+        host = self.extract_ip_from_url(IMAGE_URL)
         if not host:
             self.status['camera']['status'] = 'Invalid URL'
             self.status['camera']['last_check'] = datetime.now()
@@ -98,12 +101,10 @@ class NetworkStatus:
             self.status['camera']['status'] = 'Disconnected'
             self.status['camera']['ping_time'] = None
             return False
-        
-        self.status['camera']['last_check'] = datetime.now()
 
-    def check_ai_server(self, url):
-        """Check AI server connectivity using simple ping"""
-        host = self.extract_ip_from_url(url)
+    def check_ai_server(self):
+        """Check AI server connectivity"""
+        host = self.extract_ip_from_url(INFERENCE_URL)
         if not host:
             self.status['ai_server']['status'] = 'Invalid URL'
             self.status['ai_server']['last_check'] = datetime.now()
@@ -121,8 +122,6 @@ class NetworkStatus:
             self.status['ai_server']['status'] = 'Disconnected'
             self.status['ai_server']['ping_time'] = None
             return False
-        
-        self.status['ai_server']['last_check'] = datetime.now()
 
     def format_last_success(self, last_success):
         """Format the last successful connection time"""
@@ -136,3 +135,10 @@ class NetworkStatus:
             return f"{delta.seconds//60}m ago"
         else:
             return f"{delta.seconds//3600}h ago"
+
+    def check_all(self):
+        """Check all network connections"""
+        self.check_internet()
+        self.check_camera()
+        self.check_ai_server()
+        return self.status
