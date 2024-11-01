@@ -4,6 +4,7 @@ import os
 import io
 import mmap
 import sys
+import time
 import numpy as np
 from PIL import Image, ImageDraw, ImageFont
 from datetime import datetime
@@ -13,15 +14,21 @@ class FramebufferUI(BaseUI):
     def __init__(self):
         super().__init__()
         self.fb = self._init_framebuffer()
+        self.current_predictions = None
+        self.last_draw_time = None
+        self.REDRAW_INTERVAL = 1.0  # Redraw at most once per second
         
-        # Try to load a system font
+        # Try to load fonts
         try:
             self.font = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSansMono.ttf", 14)
+            self.small_font = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSansMono.ttf", 10)
         except:
             try:
                 self.font = ImageFont.truetype("/usr/share/fonts/TTF/DejaVuSansMono.ttf", 14)
+                self.small_font = ImageFont.truetype("/usr/share/fonts/TTF/DejaVuSansMono.ttf", 10)
             except:
                 self.font = ImageFont.load_default()
+                self.small_font = ImageFont.load_default()
 
         # Create image buffer
         self.image = Image.new('RGB', (self.fb['width'], self.fb['height']), (0, 0, 0))
@@ -30,6 +37,10 @@ class FramebufferUI(BaseUI):
         # Calculate layout dimensions
         self.ui_width = self.fb['width'] // 2
         self.image_width = self.fb['width'] - self.ui_width
+        self.image_display_size = (936, 936)  # Fixed display size
+        
+        print(f"UI initialized with dimensions: {self.fb['width']}x{self.fb['height']}")
+        print(f"Image display area: {self.image_width}x{self.image_display_size[1]} at ({self.ui_width}, 72)")
 
         # Pre-compute colors
         self.colors = {
@@ -38,7 +49,17 @@ class FramebufferUI(BaseUI):
             'red': self._rgb_to_rgb565(255, 0, 0),
             'green': self._rgb_to_rgb565(0, 255, 0),
             'blue': self._rgb_to_rgb565(0, 0, 255),
-            'cyan': self._rgb_to_rgb565(0, 255, 255)
+            'cyan': self._rgb_to_rgb565(0, 255, 255),
+            'yellow': self._rgb_to_rgb565(255, 255, 0)
+        }
+        
+        # Define colors for different defect types
+        self.defect_colors = {
+            'scratch': (255, 0, 0),    # Red
+            'dent': (0, 255, 0),       # Green
+            'crack': (255, 255, 0),    # Yellow
+            'chip': (0, 255, 255),     # Cyan
+            'default': (255, 165, 0)   # Orange (for unknown defect types)
         }
 
     def _init_framebuffer(self):
@@ -99,11 +120,11 @@ class FramebufferUI(BaseUI):
             sys.exit(1)
 
     def _draw_camera_view(self, x, y, width, height):
-        """Draw the camera image or placeholder"""
+        """Draw the camera image with detection overlays"""
         # Draw border
         self.drawer.rectangle([x, y, x + width, y + height], outline=(255, 255, 255))
         
-        if self.current_image and hasattr(self.current_image, 'mode'):  # Verify it's a valid PIL Image
+        if self.current_image and hasattr(self.current_image, 'mode'):
             try:
                 # Create a copy for resizing
                 img_copy = self.current_image.copy()
@@ -116,16 +137,190 @@ class FramebufferUI(BaseUI):
                 # Paste the image
                 self.image.paste(img_copy, (img_x, img_y))
                 
+                # Draw detections if available
+                if self.current_predictions and 'predictions' in self.current_predictions:
+                    self._draw_detections(
+                        self.current_predictions['predictions'],
+                        img_x, img_y,
+                        img_copy.width, img_copy.height
+                    )
+                
                 # Draw timestamp if available
                 if self.image_timestamp:
                     timestamp_str = f"Captured: {self.image_timestamp.strftime('%H:%M:%S')}"
                     self.drawer.text((x + 5, y + 5), timestamp_str, 
                                 font=self.font, fill=(255, 255, 0))
+                    
+                # Draw detection summary if available
+                if self.current_predictions and 'summary' in self.current_predictions:
+                    self._draw_detection_summary(x + 5, y + height - 60)
+                    
             except Exception as e:
                 print(f"Error drawing camera view: {e}")
                 self._draw_placeholder(x, y, width, height)
         else:
             self._draw_placeholder(x, y, width, height)
+
+    def _draw_detections(self, predictions, img_x, img_y, img_width, img_height):
+        """Draw detection boxes and labels on the image"""
+        print(f"Drawing {len(predictions)} detections")
+        print(f"Image dimensions: {img_width}x{img_height} at ({img_x}, {img_y})")
+        
+        # Get actual image dimensions from metadata
+        if self.current_predictions and 'metadata' in self.current_predictions:
+            metadata = self.current_predictions['metadata']
+            source_width = metadata.get('image_size', {}).get('width', 1920)
+            source_height = metadata.get('image_size', {}).get('height', 1080)
+        else:
+            source_width = 1920  # Default values if metadata not available
+            source_height = 1080
+        
+        print(f"Source image dimensions: {source_width}x{source_height}")
+        
+        # Calculate scaling factors to map from source to display
+        scale_x = img_width / source_width
+        scale_y = img_height / source_height
+        
+        print(f"Scale factors: x={scale_x:.3f}, y={scale_y:.3f}")
+        
+        for i, pred in enumerate(predictions):
+            try:
+                # Get detection info
+                bbox = pred.get('bbox', [])
+                if not bbox or len(bbox) != 4:
+                    print(f"Invalid bbox for prediction {i}: {bbox}")
+                    continue
+                    
+                confidence = pred.get('confidence', 0)
+                class_name = pred.get('class_name', 'unknown')
+                
+                # Get the original coordinates from metadata if available
+                metadata = pred.get('metadata', {})
+                orig_coords = metadata.get('original_coords', {})
+                
+                if orig_coords:
+                    # Use original pixel coordinates and scale them
+                    x = orig_coords.get('x', 0)
+                    y = orig_coords.get('y', 0)
+                    width = orig_coords.get('width', 0)
+                    height = orig_coords.get('height', 0)
+                    
+                    # Scale to display coordinates
+                    x1 = img_x + int(x * scale_x)
+                    y1 = img_y + int(y * scale_y)
+                    x2 = img_x + int((x + width) * scale_x)
+                    y2 = img_y + int((y + height) * scale_y)
+                else:
+                    # Use normalized coordinates [0,1]
+                    x1 = img_x + int(bbox[0] * img_width)
+                    y1 = img_y + int(bbox[1] * img_height)
+                    x2 = img_x + int(bbox[2] * img_width)
+                    y2 = img_y + int(bbox[3] * img_height)
+                
+                # Ensure coordinates are within bounds
+                x1 = max(img_x, min(img_x + img_width - 1, x1))
+                y1 = max(img_y, min(img_y + img_height - 1, y1))
+                x2 = max(img_x, min(img_x + img_width - 1, x2))
+                y2 = max(img_y, min(img_y + img_height - 1, y2))
+                
+                # Ensure box has minimum size
+                if x2 - x1 < 2: x2 = x1 + 2
+                if y2 - y1 < 2: y2 = y1 + 2
+                
+                print(f"Drawing detection {i}: {class_name} at ({x1},{y1},{x2},{y2}) conf={confidence:.2f}")
+                
+                # Get color for this defect type
+                color = self.defect_colors.get(class_name.lower(), self.defect_colors['default'])
+                
+                # Draw box with minimum width of 2 pixels
+                self.drawer.rectangle([x1, y1, x2, y2], outline=color, width=2)
+                
+                # Prepare label text
+                label = f"{class_name} {confidence:.1%}"
+                
+                # Draw label background
+                text_bb = self.drawer.textbbox((0, 0), label, font=self.small_font)
+                text_width = text_bb[2] - text_bb[0]
+                text_height = text_bb[3] - text_bb[1]
+                margin = 2
+                
+                # Position label above box if possible, inside if not
+                label_x = x1
+                label_y = y1 - text_height - 2*margin
+                if label_y < img_y:
+                    label_y = y1 + margin
+                
+                # Ensure label stays within image bounds
+                if label_x + text_width + 2*margin > img_x + img_width:
+                    label_x = img_x + img_width - text_width - 2*margin
+                
+                self.drawer.rectangle(
+                    [label_x, label_y, label_x + text_width + 2*margin, label_y + text_height + 2*margin],
+                    fill=color
+                )
+                
+                # Draw label text
+                self.drawer.text(
+                    (label_x + margin, label_y + margin),
+                    label,
+                    font=self.small_font,
+                    fill=(0, 0, 0)
+                )
+                
+            except Exception as e:
+                print(f"Error drawing detection {i}: {e}")
+                import traceback
+                traceback.print_exc()
+                continue
+
+    def _draw_detection_summary(self, x, y):
+        """Draw detection summary at the bottom of the image"""
+        summary = self.current_predictions['summary']
+        
+        # Draw background
+        padding = 5
+        line_height = 15
+        num_lines = len(summary['class_counts']) + 1
+        
+        self.drawer.rectangle(
+            [x - padding, y - padding,
+             x + 200, y + (line_height * num_lines) + padding],
+            fill=(0, 0, 0, 128)
+        )
+        
+        # Draw total count
+        self.drawer.text(
+            (x, y),
+            f"Total defects: {summary['count']}",
+            font=self.small_font,
+            fill=(255, 255, 255)
+        )
+        
+        # Draw counts by type
+        y_offset = line_height
+        for class_name, count in summary['class_counts'].items():
+            color = self.defect_colors.get(class_name.lower(), self.defect_colors['default'])
+            self.drawer.text(
+                (x, y + y_offset),
+                f"• {class_name}: {count}",
+                font=self.small_font,
+                fill=color
+            )
+            y_offset += line_height
+
+    def update_predictions(self, predictions):
+        """Update the current predictions"""
+        try:
+            print("Updating predictions:", predictions is not None)
+            self.current_predictions = predictions
+            if predictions:
+                print(f"Number of predictions: {len(predictions.get('predictions', []))}")
+                print(f"First prediction: {predictions['predictions'][0] if predictions['predictions'] else 'None'}")
+            self.update_status_message("Updated detection display")
+        except Exception as e:
+            print(f"Error in update_predictions: {e}")
+            import traceback
+            traceback.print_exc()
 
     def _draw_placeholder(self, x, y, width, height):
         """Draw placeholder when no image is available"""
@@ -158,6 +353,12 @@ class FramebufferUI(BaseUI):
 
     def update_display(self, gpio_controller, network_status):
         """Update the framebuffer display"""
+        current_time = time.time()
+        
+        # Only redraw if enough time has passed
+        if self.last_draw_time and (current_time - self.last_draw_time) < self.REDRAW_INTERVAL:
+            return
+            
         try:
             # Clear the image
             self.drawer.rectangle([0, 0, self.fb['width'], self.fb['height']], fill=(0, 0, 0))
@@ -194,6 +395,7 @@ class FramebufferUI(BaseUI):
 
             # Update framebuffer
             self._update_framebuffer()
+            self.last_draw_time = current_time
 
         except Exception as e:
             print(f"Error updating display: {e}")
