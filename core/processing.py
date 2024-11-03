@@ -1,21 +1,29 @@
 import requests
-from config import (
-    IMAGE_URL, 
-    INFERENCE_URL, 
-    NETWORK_TIMEOUTS, 
-    DOWNLOAD_CHUNK_SIZE
-)
+from inference_sdk import InferenceHTTPClient
 from typing import Optional, Dict, List, Any, Tuple
 import logging
 from datetime import datetime
 import json
+from io import BytesIO
+import tempfile
+import os
 
 class ImageProcessor:
-    def __init__(self, status_callback=None):
+    def __init__(self, api_key: str, model_id: str, status_callback=None):
         self.status_callback = status_callback
         self.refresh_ui = None
         self.logger = logging.getLogger(__name__)
         self.last_predictions = None
+        
+        # Initialize Roboflow client
+        self.client = InferenceHTTPClient(
+            api_url="https://detect.roboflow.com",
+            api_key=api_key
+        )
+        self.model_id = model_id
+        
+        # Create a temporary directory for image processing
+        self.temp_dir = tempfile.mkdtemp()
         
         # Confidence thresholds
         self.CONFIDENCE_THRESHOLDS = {
@@ -24,47 +32,31 @@ class ImageProcessor:
             'low': 0.50
         }
 
-    def get_image(self) -> Optional[bytes]:
+    def get_image(self, image_url: str) -> Optional[bytes]:
         """Capture image from camera"""
         self.update_status("Initiating image capture", is_network=True)
         
         try:
             self.update_status("Opening connection to camera...", is_network=True)
             
-            response = requests.get(
-                IMAGE_URL,
-                timeout=(NETWORK_TIMEOUTS['connect'], NETWORK_TIMEOUTS['read']),
-                stream=True
-            )
+            response = requests.get(image_url, timeout=5)  # Add timeout
+            response.raise_for_status()
             
             self.update_status("Connected to camera, starting image transfer...", is_network=True)
             
-            # Get content length if available
-            total_size = int(response.headers.get('content-length', 0))
-            if total_size:
-                self.update_status(f"Image size: {total_size/1024:.1f} KB", is_network=True)
+            # Verify content type is an image
+            content_type = response.headers.get('content-type', '')
+            if not content_type.startswith('image/'):
+                raise ValueError(f"Invalid content type: {content_type}")
+                
+            image_data = response.content
             
-            # Stream the response content
-            chunks = []
-            bytes_received = 0
-            last_progress_update = 0
-            
-            for chunk in response.iter_content(chunk_size=DOWNLOAD_CHUNK_SIZE):
-                if chunk:
-                    chunks.append(chunk)
-                    bytes_received += len(chunk)
-                    
-                    if total_size > 100000:  # Only for images > 100KB
-                        progress = (bytes_received / total_size) * 100
-                        if progress - last_progress_update >= 5:  # Update every 5% progress
-                            self.update_status(
-                                f"Downloading: {progress:.1f}% ({bytes_received/1024:.1f} KB / {total_size/1024:.1f} KB)",
-                                is_network=True
-                            )
-                            last_progress_update = progress
-            
-            self.update_status("Image download complete", is_network=True)
-            return b''.join(chunks)
+            # Verify we got actual image data
+            if len(image_data) < 100:  # Basic sanity check
+                raise ValueError(f"Suspiciously small image data: {len(image_data)} bytes")
+                
+            self.update_status(f"Image download complete: {len(image_data)/1024:.1f} KB", is_network=True)
+            return image_data
             
         except Exception as e:
             self.logger.error(f"Error during image capture: {str(e)}", exc_info=True)
@@ -73,84 +65,118 @@ class ImageProcessor:
 
     def analyze_image(self, image_data: bytes) -> Optional[Dict[str, Any]]:
         """
-        Send image to AI server for analysis and process results
+        Send image to Roboflow for analysis and process results
         """
         if not image_data:
             self.update_status("No image data to analyze", is_network=True)
             return None
 
+        temp_path = None
         try:
-            self.update_status("Sending image for analysis...", is_network=True)
+            self.update_status("Sending image to Roboflow for analysis...", is_network=True)
             
-            files = {'image': ('image.jpg', image_data, 'image/jpeg')}
-            response = requests.post(
-                INFERENCE_URL, 
-                files=files,
-                timeout=(NETWORK_TIMEOUTS['connect'], NETWORK_TIMEOUTS['read'])
+            # Save image data to temporary file
+            temp_path = os.path.join(self.temp_dir, f"temp_image_{datetime.now().strftime('%Y%m%d_%H%M%S')}.jpg")
+            with open(temp_path, 'wb') as f:
+                f.write(image_data)
+            
+            # Call Roboflow inference with file path
+            result = self.client.infer(
+                temp_path,
+                model_id=self.model_id
             )
             
             # Print raw response for debugging
-            print("\nRaw API Response:")
-            print(f"Status Code: {response.status_code}")
-            print("Response Headers:", dict(response.headers))
-            try:
-                print("Response JSON:", json.dumps(response.json(), indent=2))
-            except:
-                print("Raw Response Text:", response.text)
+            print("\nRaw Roboflow Response:")
+            print(json.dumps(result, indent=2))
             
-            if response.status_code == 200:
-                result = response.json()
-                processed_results = self._process_predictions(result)
-                self.last_predictions = processed_results
-                return processed_results
-                
-            self.update_status(f"Server returned error: {response.status_code}", is_network=True)
-            print(f"Error response content: {response.text}")
-            return None
+            # Process the predictions
+            processed_results = self._process_predictions({
+                'predictions': result.get('predictions', []),
+                'metadata': {
+                    'model_version': result.get('model_version', 'unknown'),
+                    'processing_time': result.get('inference_time', 0)
+                }
+            })
+            
+            self.last_predictions = processed_results
+            return processed_results
                 
         except Exception as e:
             self.logger.error(f"Analysis failed: {str(e)}", exc_info=True)
             self.update_status(f"Analysis failed: {str(e)}", is_network=True)
             return None
+        finally:
+            # Clean up temporary file
+            if temp_path and os.path.exists(temp_path):
+                try:
+                    os.remove(temp_path)
+                except Exception as e:
+                    self.logger.error(f"Error cleaning up temporary file: {str(e)}")
 
     def _process_predictions(self, result: Dict[str, Any]) -> Dict[str, Any]:
-        """Process and validate prediction results"""
+        """Process and validate Roboflow prediction results"""
         try:
             predictions = result.get('predictions', [])
-            metadata = result.get('metadata', {})
+            image_info = result.get('image', {})
             
             if not predictions:
                 return {
                     'predictions': [],
-                    'metadata': metadata,
-                    'summary': self._summarize_predictions([]),
-                    'timestamp': datetime.now().isoformat()
+                    'metadata': {
+                        'image_size': image_info,
+                        'timestamp': datetime.now().isoformat()
+                    },
+                    'summary': self._summarize_predictions([])
                 }
             
             # Process each prediction
             processed_preds = []
             for i, pred in enumerate(predictions):
                 try:
+                    # Get confidence (already in decimal form in new response)
                     confidence = pred.get('confidence', 0)
                     
                     # Skip low confidence predictions
                     if confidence < self.CONFIDENCE_THRESHOLDS['low']:
                         continue
                     
-                    # Get bbox from the prediction
-                    bbox = pred.get('bbox', [])
-                    if not bbox or len(bbox) != 4:
-                        print(f"Warning: Invalid bbox in prediction {i}: {bbox}")
-                        continue
+                    # Get original pixel coordinates
+                    x = pred.get('x', 0)
+                    y = pred.get('y', 0)
+                    width = pred.get('width', 0)
+                    height = pred.get('height', 0)
                     
-                    # Ensure bbox coordinates are valid
-                    bbox = [max(0, min(1, coord)) for coord in bbox]
+                    # Calculate normalized coordinates [0,1]
+                    img_width = image_info.get('width', 1)
+                    img_height = image_info.get('height', 1)
+                    
+                    # Store original coordinates for UI scaling
+                    original_coords = {
+                        'x': x,
+                        'y': y,
+                        'width': width,
+                        'height': height
+                    }
+                    
+                    # Calculate normalized coordinates
+                    x_norm = x / img_width
+                    y_norm = y / img_height
+                    w_norm = width / img_width
+                    h_norm = height / img_height
+                    
+                    bbox = [
+                        max(0, min(1, x_norm - w_norm/2)),  # x1
+                        max(0, min(1, y_norm - h_norm/2)),  # y1
+                        max(0, min(1, x_norm + w_norm/2)),  # x2
+                        max(0, min(1, y_norm + h_norm/2))   # y2
+                    ]
                     
                     # Determine confidence level
                     confidence_level = self._get_confidence_level(confidence)
                     
                     processed_pred = {
-                        'class_name': pred.get('class_name', 'unknown'),
+                        'class_name': pred.get('class', 'unknown'),
                         'confidence': confidence,
                         'confidence_level': confidence_level,
                         'bbox': bbox,
@@ -158,10 +184,10 @@ class ImageProcessor:
                         'metadata': {
                             'area': self._calculate_bbox_area(bbox),
                             'center': self._calculate_bbox_center(bbox),
-                            'severity': self._estimate_severity(confidence, bbox)
+                            'severity': self._estimate_severity(confidence, bbox),
+                            'original_coords': original_coords
                         }
                     }
-                    print(f"Processed prediction {i}:", processed_pred)
                     processed_preds.append(processed_pred)
                     
                 except Exception as e:
@@ -174,16 +200,13 @@ class ImageProcessor:
             processed_results = {
                 'predictions': processed_preds,
                 'metadata': {
-                    **metadata,
-                    'processing_time': metadata.get('processing_time', 0),
-                    'model_version': metadata.get('model_version', 'unknown'),
+                    'image_size': image_info,
+                    'processing_time': result.get('time', 0),
+                    'inference_id': result.get('inference_id', ''),
                     'timestamp': datetime.now().isoformat()
                 },
                 'summary': self._summarize_predictions(processed_preds)
             }
-            
-            print("\nFinal processed results:")
-            print(json.dumps(processed_results, indent=2))
             
             return processed_results
             
@@ -224,12 +247,8 @@ class ImageProcessor:
 
     def _estimate_severity(self, confidence: float, bbox: List[float]) -> str:
         """Estimate defect severity based on confidence and size"""
-        if not bbox or len(bbox) != 4:
-            return 'unknown'
-            
         area = self._calculate_bbox_area(bbox)
         
-        # Severity matrix based on confidence and size
         if confidence >= self.CONFIDENCE_THRESHOLDS['high']:
             if area > 0.1:
                 return 'critical'
@@ -243,9 +262,7 @@ class ImageProcessor:
         return 'negligible'
 
     def _summarize_predictions(self, predictions: List[Dict[str, Any]]) -> Dict[str, Any]:
-        """
-        Create comprehensive summary of predictions
-        """
+        """Create comprehensive summary of predictions"""
         if not predictions:
             return {
                 'count': 0,
@@ -255,21 +272,17 @@ class ImageProcessor:
                 'total_area': 0.0
             }
             
-        # Count by class and severity
         class_counts = {}
         severity_counts = {}
         total_area = 0.0
         
         for pred in predictions:
-            # Class counts
             class_name = pred.get('class_name', 'unknown')
             class_counts[class_name] = class_counts.get(class_name, 0) + 1
             
-            # Severity counts
             severity = pred.get('metadata', {}).get('severity', 'unknown')
             severity_counts[severity] = severity_counts.get(severity, 0) + 1
             
-            # Accumulate area
             total_area += pred['metadata']['area']
             
         return {
@@ -294,16 +307,19 @@ class ImageProcessor:
         """Get the most recent prediction results"""
         return self.last_predictions
 
-    def process_piece(self) -> tuple[bool, Optional[Dict[str, Any]]]:
+    def process_piece(self, image_url: str) -> tuple[bool, Optional[Dict[str, Any]]]:
         """
         Complete piece processing pipeline
         
+        Args:
+            image_url: URL of the image to process
+            
         Returns:
             Tuple of (success: bool, results: Optional[Dict])
             where results contains the full prediction data if successful
         """
         # Get image
-        image_data = self.get_image()
+        image_data = self.get_image(image_url)
         if not image_data:
             return False, None
         

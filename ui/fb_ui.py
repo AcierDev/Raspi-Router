@@ -126,6 +126,14 @@ class FramebufferUI(BaseUI):
         
         if self.current_image and hasattr(self.current_image, 'mode'):
             try:
+                # Only print debug once per image update, not every refresh
+                if not hasattr(self, '_last_image_debug'):
+                    print(f"Drawing image: original size={self.current_image.size}")
+                    self._last_image_debug = self.current_image.size
+                elif self._last_image_debug != self.current_image.size:
+                    print(f"Drawing new image: original size={self.current_image.size}")
+                    self._last_image_debug = self.current_image.size
+                
                 # Create a copy for resizing
                 img_copy = self.current_image.copy()
                 img_copy.thumbnail((width - 4, height - 4))
@@ -139,24 +147,82 @@ class FramebufferUI(BaseUI):
                 
                 # Draw detections if available
                 if self.current_predictions and 'predictions' in self.current_predictions:
-                    self._draw_detections(
-                        self.current_predictions['predictions'],
-                        img_x, img_y,
-                        img_copy.width, img_copy.height
-                    )
-                
-                # Draw timestamp if available
+                    # Get source and display dimensions for scaling
+                    source_width = self.current_image.width
+                    source_height = self.current_image.height
+                    display_width = img_copy.width
+                    display_height = img_copy.height
+                    
+                    # Calculate scaling factors
+                    scale_x = display_width / source_width
+                    scale_y = display_height / source_height
+                    
+                    for pred in self.current_predictions['predictions']:
+                        try:
+                            # Get original coordinates
+                            orig_coords = pred['metadata']['original_coords']
+                            x_center = orig_coords['x']
+                            y_center = orig_coords['y']
+                            box_width = orig_coords['width']
+                            box_height = orig_coords['height']
+                            
+                            # Calculate display coordinates
+                            x1 = img_x + (x_center - box_width/2) * scale_x
+                            y1 = img_y + (y_center - box_height/2) * scale_y
+                            x2 = x1 + box_width * scale_x
+                            y2 = y1 + box_height * scale_y
+                            
+                            # Get color based on defect type
+                            class_name = pred['class_name'].lower()
+                            color = self.defect_colors.get(class_name, self.defect_colors['default'])
+                            
+                            # Draw bounding box
+                            self.drawer.rectangle([x1, y1, x2, y2], outline=color, width=2)
+                            
+                            # Draw label
+                            label = f"{pred['class_name']} {pred['confidence']:.1%}"
+                            text_bb = self.drawer.textbbox((0, 0), label, font=self.small_font)
+                            text_width = text_bb[2] - text_bb[0]
+                            text_height = text_bb[3] - text_bb[1]
+                            
+                            # Position label above box if possible
+                            label_x = x1
+                            label_y = y1 - text_height - 4
+                            if label_y < img_y:  # If label would go above image, put it inside box
+                                label_y = y1 + 2
+                            
+                            # Draw label background
+                            self.drawer.rectangle(
+                                [label_x, label_y, label_x + text_width + 4, label_y + text_height + 2],
+                                fill=color
+                            )
+                            
+                            # Draw label text
+                            self.drawer.text(
+                                (label_x + 2, label_y + 1),
+                                label,
+                                font=self.small_font,
+                                fill=(0, 0, 0)
+                            )
+                            
+                        except Exception as e:
+                            print(f"Error drawing detection: {e}")
+                            continue
+                    
+                # Draw timestamp
                 if self.image_timestamp:
                     timestamp_str = f"Captured: {self.image_timestamp.strftime('%H:%M:%S')}"
-                    self.drawer.text((x + 5, y + 5), timestamp_str, 
-                                font=self.font, fill=(255, 255, 0))
-                    
-                # Draw detection summary if available
-                if self.current_predictions and 'summary' in self.current_predictions:
-                    self._draw_detection_summary(x + 5, y + height - 60)
+                    self.drawer.text(
+                        (x + 5, y + 5),
+                        timestamp_str,
+                        font=self.font,
+                        fill=(255, 255, 0)
+                    )
                     
             except Exception as e:
                 print(f"Error drawing camera view: {e}")
+                import traceback
+                traceback.print_exc()
                 self._draw_placeholder(x, y, width, height)
         else:
             self._draw_placeholder(x, y, width, height)
@@ -335,15 +401,34 @@ class FramebufferUI(BaseUI):
         """Update the current camera image"""
         if image_data:
             try:
+                # Debug print original data
+                print(f"Received image data of length: {len(image_data)}")
+                
                 # Create a fresh BytesIO object
                 image_buffer = io.BytesIO(image_data)
-                # Load the image fully before storing it
+                
+                # Load the image and create a fully loaded copy
                 temp_image = Image.open(image_buffer)
-                self.current_image = temp_image.copy()  # Create a fully loaded copy
+                
+                # Debug print image details
+                print(f"Loaded image: size={temp_image.size}, mode={temp_image.mode}")
+                
+                # Convert to RGB if needed
+                if temp_image.mode != 'RGB':
+                    temp_image = temp_image.convert('RGB')
+                    print("Converted image to RGB mode")
+                
+                # Create a fully loaded copy
+                self.current_image = temp_image.copy()
                 self.image_timestamp = datetime.now()
+                
+                print(f"Stored image: size={self.current_image.size}, mode={self.current_image.mode}")
                 self.update_status_message("Camera image updated")
+                
             except Exception as e:
                 print(f"Error loading image: {e}")
+                import traceback
+                traceback.print_exc()
                 self.current_image = None
                 self.image_timestamp = None
         else:
@@ -358,22 +443,21 @@ class FramebufferUI(BaseUI):
         # Only redraw if enough time has passed
         if self.last_draw_time and (current_time - self.last_draw_time) < self.REDRAW_INTERVAL:
             return
-            
+        
         try:
             # Clear the image
             self.drawer.rectangle([0, 0, self.fb['width'], self.fb['height']], fill=(0, 0, 0))
-
-            # Draw title section
+            
+            # Layout calculations remain the same...
             title = "Automated Inspection System"
             title_w = self._get_text_width(title)
             self.drawer.text(((self.ui_width - title_w) // 2, 10), title, 
-                         font=self.font, fill=(255, 255, 255))
+                        font=self.font, fill=(255, 255, 255))
 
             # Draw state
             state_str = f"State: {self.current_status['state'].replace('_', ' ').title()}"
             self.drawer.text((10, 40), state_str, font=self.font, fill=(255, 255, 255))
 
-            # Draw sections using original layout
             net_y = self._draw_section("Network Status", "", 10, 70, self.ui_width - 20, 180)
             self._draw_network_status(network_status, 20, net_y)
 
@@ -383,20 +467,20 @@ class FramebufferUI(BaseUI):
             if self.current_status['alert']:
                 alert_y = self._draw_section("Alert", "", 10, 370, self.ui_width - 20, 60, highlight=True)
                 self.drawer.text((20, alert_y), self.current_status['alert'], 
-                             font=self.font, fill=(255, 0, 0))
+                            font=self.font, fill=(255, 0, 0))
 
             log_y = self._draw_section("System Log", "", 10, 440, self.ui_width - 20, 170)
             self._draw_log(20, log_y)
 
             # Draw camera view
             self._draw_camera_view(self.ui_width + 10, 10,
-                               self.image_width - 20,
-                               self.fb['height'] - 20)
+                            self.image_width - 20,
+                            self.fb['height'] - 20)
 
             # Update framebuffer
             self._update_framebuffer()
             self.last_draw_time = current_time
-
+            
         except Exception as e:
             print(f"Error updating display: {e}")
             import traceback

@@ -3,4 +3,4 @@
 from .curses_ui import CursesUI
 from .fb_ui import FramebufferUI
 
-__all__ = ['CursesUI', 'FramebufferUI']
+__all__ = ['FramebufferUI']
