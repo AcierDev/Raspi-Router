@@ -7,7 +7,7 @@ import sys
 import time
 import numpy as np
 from PIL import Image, ImageDraw, ImageFont
-from datetime import datetime
+from datetime import datetime, timedelta
 from .base_ui import BaseUI
 
 class FramebufferUI(BaseUI):
@@ -16,9 +16,33 @@ class FramebufferUI(BaseUI):
         self.fb = self._init_framebuffer()
         self.current_predictions = None
         self.last_draw_time = None
-        self.REDRAW_INTERVAL = 1.0  # Redraw at most once per second
+        self.REDRAW_INTERVAL = 1.0
         
-        # Try to load fonts
+        # Enhanced metrics tracking
+        self.metrics = {
+            'start_time': datetime.now(),
+            'processed_count': 0,
+            'defect_counts': {},
+            'processing_times': [],  # List of processing times in seconds
+            'current_processing_start': None,  # Track current processing start time
+            'error_count': 0,
+            'last_process_time': None,
+            'detection_history': [],
+            'hourly_counts': {},
+            'daily_counts': {},
+        }
+        
+        # Add processing time statistics
+        self.processing_stats = {
+            'min_time': float('inf'),
+            'max_time': 0,
+            'total_time': 0,
+            'count': 0
+        }
+        
+        self.MAX_HISTORY = 100
+        
+        # Rest of initialization code remains the same...
         try:
             self.font = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSansMono.ttf", 14)
             self.small_font = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSansMono.ttf", 10)
@@ -30,37 +54,185 @@ class FramebufferUI(BaseUI):
                 self.font = ImageFont.load_default()
                 self.small_font = ImageFont.load_default()
 
-        # Create image buffer
         self.image = Image.new('RGB', (self.fb['width'], self.fb['height']), (0, 0, 0))
         self.drawer = ImageDraw.Draw(self.image)
-
-        # Calculate layout dimensions
+        
         self.ui_width = self.fb['width'] // 2
         self.image_width = self.fb['width'] - self.ui_width
-        self.image_display_size = (936, 936)  # Fixed display size
-        
-        print(f"UI initialized with dimensions: {self.fb['width']}x{self.fb['height']}")
-        print(f"Image display area: {self.image_width}x{self.image_display_size[1]} at ({self.ui_width}, 72)")
+        self.image_display_size = (936, 936)
 
-        # Pre-compute colors
-        self.colors = {
-            'black': self._rgb_to_rgb565(0, 0, 0),
-            'white': self._rgb_to_rgb565(255, 255, 255),
-            'red': self._rgb_to_rgb565(255, 0, 0),
-            'green': self._rgb_to_rgb565(0, 255, 0),
-            'blue': self._rgb_to_rgb565(0, 0, 255),
-            'cyan': self._rgb_to_rgb565(0, 255, 255),
-            'yellow': self._rgb_to_rgb565(255, 255, 0)
-        }
+    def start_processing(self):
+        """Mark the start of processing for timing purposes"""
+        self.metrics['current_processing_start'] = time.time()
+
+    def update_metrics(self, results=None, error=None, processing_time=None):
+        """Update system metrics based on processing results"""
+        current_time = datetime.now()
+        hour_key = current_time.strftime('%Y-%m-%d %H:00')
+        day_key = current_time.strftime('%Y-%m-%d')
         
-        # Define colors for different defect types
-        self.defect_colors = {
-            'scratch': (255, 0, 0),    # Red
-            'dent': (0, 255, 0),       # Green
-            'crack': (255, 255, 0),    # Yellow
-            'chip': (0, 255, 255),     # Cyan
-            'default': (255, 165, 0)   # Orange (for unknown defect types)
-        }
+        # Calculate processing time if not provided
+        if processing_time is None and self.metrics['current_processing_start'] is not None:
+            processing_time = time.time() - self.metrics['current_processing_start']
+        
+        if processing_time is not None:
+            # Update processing time statistics
+            self.metrics['processing_times'].append(processing_time)
+            self.metrics['last_process_time'] = processing_time
+            
+            # Update processing stats
+            self.processing_stats['min_time'] = min(self.processing_stats['min_time'], processing_time)
+            self.processing_stats['max_time'] = max(self.processing_stats['max_time'], processing_time)
+            self.processing_stats['total_time'] += processing_time
+            self.processing_stats['count'] += 1
+            
+            # Trim history if needed
+            if len(self.metrics['processing_times']) > self.MAX_HISTORY:
+                self.metrics['processing_times'].pop(0)
+        
+        if results:
+            # Update processed count
+            self.metrics['processed_count'] += 1
+            
+            # Update defect counts
+            if 'predictions' in results:
+                for pred in results['predictions']:
+                    defect_type = pred['class_name']
+                    self.metrics['defect_counts'][defect_type] = \
+                        self.metrics['defect_counts'].get(defect_type, 0) + 1
+            
+            # Update detection history
+            self.metrics['detection_history'].append({
+                'timestamp': current_time,
+                'count': len(results.get('predictions', [])),
+                'types': [p['class_name'] for p in results.get('predictions', [])],
+                'processing_time': processing_time
+            })
+            if len(self.metrics['detection_history']) > self.MAX_HISTORY:
+                self.metrics['detection_history'].pop(0)
+            
+            # Update hourly and daily statistics
+            self._update_time_based_stats(hour_key, day_key, results, processing_time)
+            
+        if error:
+            self.metrics['error_count'] += 1
+        
+        # Reset processing start time
+        self.metrics['current_processing_start'] = None
+
+    def _update_time_based_stats(self, hour_key, day_key, results, processing_time):
+        """Update hourly and daily statistics"""
+        # Initialize hour stats if needed
+        if hour_key not in self.metrics['hourly_counts']:
+            self.metrics['hourly_counts'][hour_key] = {
+                'total': 0,
+                'defects': 0,
+                'processing_times': [],
+                'by_type': {}
+            }
+        
+        # Initialize day stats if needed
+        if day_key not in self.metrics['daily_counts']:
+            self.metrics['daily_counts'][day_key] = {
+                'total': 0,
+                'defects': 0,
+                'processing_times': [],
+                'by_type': {}
+            }
+        
+        # Update hourly stats
+        hour_stats = self.metrics['hourly_counts'][hour_key]
+        hour_stats['total'] += 1
+        hour_stats['defects'] += len(results.get('predictions', []))
+        if processing_time:
+            hour_stats['processing_times'].append(processing_time)
+        
+        # Update daily stats
+        day_stats = self.metrics['daily_counts'][day_key]
+        day_stats['total'] += 1
+        day_stats['defects'] += len(results.get('predictions', []))
+        if processing_time:
+            day_stats['processing_times'].append(processing_time)
+
+    def _draw_metrics_section(self, x, y, width):
+        """Draw comprehensive metrics section"""
+        current_time = datetime.now()
+        uptime = current_time - self.metrics['start_time']
+        
+        # Calculate statistics
+        total_processed = self.metrics['processed_count']
+        total_defects = sum(self.metrics['defect_counts'].values())
+        avg_defects = total_defects / max(1, total_processed)
+        
+        # Calculate processing time statistics
+        if self.processing_stats['count'] > 0:
+            avg_time = self.processing_stats['total_time'] / self.processing_stats['count']
+            min_time = self.processing_stats['min_time']
+            max_time = self.processing_stats['max_time']
+            last_time = self.metrics['last_process_time']
+        else:
+            avg_time = min_time = max_time = last_time = 0
+        
+        # Draw metrics section background
+        metrics_y = self._draw_section("System Metrics", "", x, y, width, 320)
+        
+        # Draw basic metrics
+        self.drawer.text((x + 10, metrics_y), f"Uptime: {str(uptime).split('.')[0]}", 
+                        font=self.font, fill=(255, 255, 255))
+        metrics_y += 20
+        
+        self.drawer.text((x + 10, metrics_y), f"Total Processed: {total_processed}", 
+                        font=self.font, fill=(255, 255, 255))
+        metrics_y += 20
+        
+        # Draw processing time metrics with colored values
+        if last_time is not None:
+            last_color = (255, 165, 0) if last_time > avg_time * 1.5 else (255, 255, 255)
+            self.drawer.text((x + 10, metrics_y), f"Last Process: {last_time:.2f}s", 
+                           font=self.font, fill=last_color)
+        metrics_y += 20
+        
+        self.drawer.text((x + 10, metrics_y), f"Avg Process: {avg_time:.2f}s", 
+                        font=self.font, fill=(255, 255, 255))
+        metrics_y += 20
+        
+        self.drawer.text((x + 10, metrics_y), f"Min Process: {min_time:.2f}s", 
+                        font=self.font, fill=(0, 255, 0))
+        metrics_y += 20
+        
+        self.drawer.text((x + 10, metrics_y), f"Max Process: {max_time:.2f}s", 
+                        font=self.font, fill=(255, 0, 0))
+        metrics_y += 30
+        
+        # Draw defect metrics
+        self.drawer.text((x + 10, metrics_y), f"Total Defects: {total_defects}", 
+                        font=self.font, fill=(255, 255, 255))
+        metrics_y += 20
+        
+        self.drawer.text((x + 10, metrics_y), f"Avg Defects/Item: {avg_defects:.2f}", 
+                        font=self.font, fill=(255, 255, 255))
+        metrics_y += 20
+        
+        # Draw error metrics
+        error_rate = (self.metrics['error_count'] / max(1, total_processed)) * 100
+        self.drawer.text((x + 10, metrics_y), f"Errors: {self.metrics['error_count']} ({error_rate:.1f}%)", 
+                        font=self.font, fill=(255, 0, 0))
+        metrics_y += 30
+        
+        # Draw defect type breakdown
+        self.drawer.text((x + 10, metrics_y), "Defect Types:", 
+                        font=self.font, fill=(255, 255, 255))
+        metrics_y += 20
+        
+        for defect_type, count in sorted(self.metrics['defect_counts'].items()):
+            color = self.defect_colors.get(defect_type.lower(), self.defect_colors['default'])
+            percentage = (count / max(1, total_defects)) * 100
+            self.drawer.text((x + 20, metrics_y), 
+                           f"{defect_type}: {count} ({percentage:.1f}%)", 
+                           font=self.small_font, fill=color)
+            metrics_y += 15
+        
+        return metrics_y + 10
 
     def _init_framebuffer(self):
         """Initialize framebuffer device for Raspberry Pi"""
@@ -437,46 +609,56 @@ class FramebufferUI(BaseUI):
             self.update_status_message("Camera image cleared")
 
     def update_display(self, gpio_controller, network_status):
-        """Update the framebuffer display"""
+        """Update the framebuffer display with enhanced metrics"""
         current_time = time.time()
         
-        # Only redraw if enough time has passed
         if self.last_draw_time and (current_time - self.last_draw_time) < self.REDRAW_INTERVAL:
             return
-        
+            
         try:
             # Clear the image
             self.drawer.rectangle([0, 0, self.fb['width'], self.fb['height']], fill=(0, 0, 0))
             
-            # Layout calculations remain the same...
+            # Draw title
             title = "Automated Inspection System"
             title_w = self._get_text_width(title)
             self.drawer.text(((self.ui_width - title_w) // 2, 10), title, 
                         font=self.font, fill=(255, 255, 255))
-
+            
             # Draw state
             state_str = f"State: {self.current_status['state'].replace('_', ' ').title()}"
             self.drawer.text((10, 40), state_str, font=self.font, fill=(255, 255, 255))
-
-            net_y = self._draw_section("Network Status", "", 10, 70, self.ui_width - 20, 180)
+            
+            # Draw metrics section first
+            metrics_y = self._draw_metrics_section(10, 70, self.ui_width - 20)
+            
+            # Draw network status
+            net_y = self._draw_section("Network Status", "", 10, metrics_y + 10, 
+                                     self.ui_width - 20, 180)
             self._draw_network_status(network_status, 20, net_y)
-
-            sensor_y = self._draw_section("Sensor Status", "", 10, 260, self.ui_width - 20, 100)
+            
+            # Draw sensor status
+            sensor_y = self._draw_section("Sensor Status", "", 10, net_y + 190, 
+                                        self.ui_width - 20, 100)
             self._draw_sensor_status(gpio_controller, 20, sensor_y)
-
+            
+            # Draw alert if present
             if self.current_status['alert']:
-                alert_y = self._draw_section("Alert", "", 10, 370, self.ui_width - 20, 60, highlight=True)
+                alert_y = self._draw_section("Alert", "", 10, sensor_y + 110, 
+                                           self.ui_width - 20, 60, highlight=True)
                 self.drawer.text((20, alert_y), self.current_status['alert'], 
                             font=self.font, fill=(255, 0, 0))
-
-            log_y = self._draw_section("System Log", "", 10, 440, self.ui_width - 20, 170)
+            
+            # Draw system log
+            log_y = self._draw_section("System Log", "", 10, sensor_y + 180, 
+                                     self.ui_width - 20, 170)
             self._draw_log(20, log_y)
-
+            
             # Draw camera view
             self._draw_camera_view(self.ui_width + 10, 10,
-                            self.image_width - 20,
-                            self.fb['height'] - 20)
-
+                                 self.image_width - 20,
+                                 self.fb['height'] - 20)
+            
             # Update framebuffer
             self._update_framebuffer()
             self.last_draw_time = current_time

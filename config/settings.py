@@ -38,3 +38,9 @@ UI_REFRESH_RATE = 0.05     # seconds
 # Logging Settings
 MAX_LOG_MESSAGES = 15      # Maximum number of messages to store
 VISIBLE_LOG_MESSAGES = 8   # Number of messages to show in UI
+
+##############
+
+MAX_RETRIES = 3          # Number of retry attempts
+RETRY_DELAY = 0.5        # 500ms between retries
+HEALTH_CHECK_INTERVAL = 5.0  
