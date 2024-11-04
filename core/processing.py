@@ -1,5 +1,4 @@
 import requests
-from inference_sdk import InferenceHTTPClient
 from typing import Optional, Dict, List, Any, Tuple
 import logging
 from datetime import datetime
@@ -7,20 +6,14 @@ import json
 from io import BytesIO
 import tempfile
 import os
+from config import INFERENCE_URL, NETWORK_TIMEOUTS
 
 class ImageProcessor:
-    def __init__(self, api_key: str, model_id: str, status_callback=None):
+    def __init__(self, status_callback=None):
         self.status_callback = status_callback
-        self.refresh_ui = None
         self.logger = logging.getLogger(__name__)
         self.last_predictions = None
-        
-        # Initialize Roboflow client
-        self.client = InferenceHTTPClient(
-            api_url="https://detect.roboflow.com",
-            api_key=api_key
-        )
-        self.model_id = model_id
+        self.image_size = (3024, 3024)
         
         # Create a temporary directory for image processing
         self.temp_dir = tempfile.mkdtemp()
@@ -39,7 +32,10 @@ class ImageProcessor:
         try:
             self.update_status("Opening connection to camera...", is_network=True)
             
-            response = requests.get(image_url, timeout=5)  # Add timeout
+            response = requests.get(
+                image_url, 
+                timeout=NETWORK_TIMEOUTS['connect']
+            )
             response.raise_for_status()
             
             self.update_status("Connected to camera, starting image transfer...", is_network=True)
@@ -65,145 +61,143 @@ class ImageProcessor:
 
     def analyze_image(self, image_data: bytes) -> Optional[Dict[str, Any]]:
         """
-        Send image to Roboflow for analysis and process results
+        Send image to inference endpoint for analysis
         """
         if not image_data:
             self.update_status("No image data to analyze", is_network=True)
             return None
 
-        temp_path = None
         try:
-            self.update_status("Sending image to Roboflow for analysis...", is_network=True)
+            self.update_status("Sending image for analysis...", is_network=True)
             
-            # Save image data to temporary file
-            temp_path = os.path.join(self.temp_dir, f"temp_image_{datetime.now().strftime('%Y%m%d_%H%M%S')}.jpg")
-            with open(temp_path, 'wb') as f:
-                f.write(image_data)
+            # Prepare the image file for upload
+            files = {
+                'image': ('image.jpg', image_data, 'image/jpeg')
+            }
             
-            # Call Roboflow inference with file path
-            result = self.client.infer(
-                temp_path,
-                model_id=self.model_id
+            # Send POST request to inference endpoint
+            response = requests.post(
+                INFERENCE_URL,
+                files=files,
+                timeout=NETWORK_TIMEOUTS['read']
             )
+            response.raise_for_status()
+            
+            # Parse the response
+            result = response.json()
             
             # Print raw response for debugging
-            print("\nRaw Roboflow Response:")
+            print("\nRaw Inference Response:")
             print(json.dumps(result, indent=2))
             
+            # Check if response indicates success
+            if not result.get('success', False):
+                raise Exception("Inference request was not successful")
+            
             # Process the predictions
-            processed_results = self._process_predictions({
-                'predictions': result.get('predictions', []),
-                'metadata': {
-                    'model_version': result.get('model_version', 'unknown'),
-                    'processing_time': result.get('inference_time', 0)
-                }
-            })
+            processed_results = self._process_predictions(result)
             
             self.last_predictions = processed_results
+            
+            # Debug prints
+            print(f"Updating predictions: {bool(processed_results)}")
+            if processed_results:
+                print(f"Number of predictions: {len(processed_results.get('predictions', []))}")
+                print(f"First prediction: {processed_results.get('predictions', [])[0] if processed_results.get('predictions') else None}")
+            
             return processed_results
                 
         except Exception as e:
             self.logger.error(f"Analysis failed: {str(e)}", exc_info=True)
             self.update_status(f"Analysis failed: {str(e)}", is_network=True)
             return None
-        finally:
-            # Clean up temporary file
-            if temp_path and os.path.exists(temp_path):
-                try:
-                    os.remove(temp_path)
-                except Exception as e:
-                    self.logger.error(f"Error cleaning up temporary file: {str(e)}")
+
+    def _normalize_to_pixels(self, bbox: List[float]) -> Dict[str, int]:
+        """Convert normalized coordinates to pixel coordinates and ensure alignment."""
+        width, height = self.image_size
+        x_min, y_min, x_max, y_max = bbox  # Normalize bbox [x_min, y_min, x_max, y_max]
+        
+        # Convert to pixel-based coordinates, ensuring proper alignment with origin
+        pixel_bbox = {
+            'x': round(x_min * width),  # Top-left x in pixels
+            'y': round(y_min * height),  # Top-left y in pixels
+            'width': round((x_max - x_min) * width),  # Width in pixels
+            'height': round((y_max - y_min) * height)  # Height in pixels
+        }
+        
+        # Debug log for verification
+        print(f"Normalized bbox: {bbox} -> Pixel bbox: {pixel_bbox}")
+        return pixel_bbox
+
 
     def _process_predictions(self, result: Dict[str, Any]) -> Dict[str, Any]:
-        """Process and validate Roboflow prediction results"""
+        """Process and validate prediction results with new response format"""
         try:
-            predictions = result.get('predictions', [])
-            image_info = result.get('image', {})
+            # Extract data from nested structure
+            data = result.get('data', {})
+            predictions = data.get('predictions', [])
+            file_info = data.get('file_info', {})
+            timestamp = result.get('timestamp')
             
             if not predictions:
                 return {
                     'predictions': [],
                     'metadata': {
-                        'image_size': image_info,
-                        'timestamp': datetime.now().isoformat()
+                        'timestamp': timestamp,
+                        'file_info': file_info
                     },
                     'summary': self._summarize_predictions([])
                 }
             
             # Process each prediction
             processed_preds = []
-            for i, pred in enumerate(predictions):
+            for pred in predictions:
                 try:
-                    # Get confidence (already in decimal form in new response)
                     confidence = pred.get('confidence', 0)
                     
                     # Skip low confidence predictions
                     if confidence < self.CONFIDENCE_THRESHOLDS['low']:
                         continue
                     
-                    # Get original pixel coordinates
-                    x = pred.get('x', 0)
-                    y = pred.get('y', 0)
-                    width = pred.get('width', 0)
-                    height = pred.get('height', 0)
+                    # Get bbox coordinates (already in normalized format)
+                    bbox = pred.get('bbox', [0, 0, 0, 0])
                     
-                    # Calculate normalized coordinates [0,1]
-                    img_width = image_info.get('width', 1)
-                    img_height = image_info.get('height', 1)
-                    
-                    # Store original coordinates for UI scaling
-                    original_coords = {
-                        'x': x,
-                        'y': y,
-                        'width': width,
-                        'height': height
-                    }
-                    
-                    # Calculate normalized coordinates
-                    x_norm = x / img_width
-                    y_norm = y / img_height
-                    w_norm = width / img_width
-                    h_norm = height / img_height
-                    
-                    bbox = [
-                        max(0, min(1, x_norm - w_norm/2)),  # x1
-                        max(0, min(1, y_norm - h_norm/2)),  # y1
-                        max(0, min(1, x_norm + w_norm/2)),  # x2
-                        max(0, min(1, y_norm + h_norm/2))   # y2
-                    ]
+                    # Calculate original pixel coordinates
+                    original_coords = self._normalize_to_pixels(bbox)
                     
                     # Determine confidence level
                     confidence_level = self._get_confidence_level(confidence)
                     
                     processed_pred = {
-                        'class_name': pred.get('class', 'unknown'),
+                        'class_name': pred.get('class_name', 'unknown'),
                         'confidence': confidence,
                         'confidence_level': confidence_level,
                         'bbox': bbox,
-                        'detection_id': pred.get('detection_id', f'det_{i}'),
+                        'detection_id': pred.get('detection_id', 'unknown'),
                         'metadata': {
                             'area': self._calculate_bbox_area(bbox),
                             'center': self._calculate_bbox_center(bbox),
                             'severity': self._estimate_severity(confidence, bbox),
-                            'original_coords': original_coords
+                            'original_coords': original_coords  # Add original coordinates
                         }
                     }
                     processed_preds.append(processed_pred)
                     
                 except Exception as e:
-                    print(f"Error processing prediction {i}: {e}")
+                    print(f"Error processing prediction: {e}")
                     continue
             
             # Sort predictions by confidence
             processed_preds.sort(key=lambda x: x['confidence'], reverse=True)
             
+            # Create final processed results
             processed_results = {
                 'predictions': processed_preds,
                 'metadata': {
-                    'image_size': image_info,
-                    'processing_time': result.get('time', 0),
-                    'inference_id': result.get('inference_id', ''),
-                    'timestamp': datetime.now().isoformat()
+                    'file_info': file_info,
+                    'timestamp': timestamp,
+                    'stored_locations': file_info.get('stored_locations', {}),
+                    'image_size': self.image_size
                 },
                 'summary': self._summarize_predictions(processed_preds)
             }
@@ -214,12 +208,7 @@ class ImageProcessor:
             print(f"Error in _process_predictions: {e}")
             import traceback
             traceback.print_exc()
-            return {
-                'predictions': [],
-                'metadata': {},
-                'summary': self._summarize_predictions([]),
-                'timestamp': datetime.now().isoformat()
-            }
+            return None
 
     def _get_confidence_level(self, confidence: float) -> str:
         """Determine confidence level category"""
@@ -296,33 +285,11 @@ class ImageProcessor:
         }
 
     def update_status(self, message: str, is_network: bool = False) -> None:
-        """Update status with callback if available"""
-        self.logger.info(message)
-        if self.status_callback:
-            self.status_callback(message, is_network=is_network)
-        if self.refresh_ui:
-            self.refresh_ui()
+            """Update status with callback if available"""
+            self.logger.info(message)
+            if self.status_callback:
+                self.status_callback(message, is_network=is_network)
 
     def get_last_predictions(self) -> Optional[Dict[str, Any]]:
         """Get the most recent prediction results"""
         return self.last_predictions
-
-    def process_piece(self, image_url: str) -> tuple[bool, Optional[Dict[str, Any]]]:
-        """
-        Complete piece processing pipeline
-        
-        Args:
-            image_url: URL of the image to process
-            
-        Returns:
-            Tuple of (success: bool, results: Optional[Dict])
-            where results contains the full prediction data if successful
-        """
-        # Get image
-        image_data = self.get_image(image_url)
-        if not image_data:
-            return False, None
-        
-        # Analyze image
-        results = self.analyze_image(image_data)
-        return bool(results), results

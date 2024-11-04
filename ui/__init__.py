@@ -1,6 +1,2 @@
-# ui/__init__.py
-
-from .curses_ui import CursesUI
-from .fb_ui import FramebufferUI
-
-__all__ = ['FramebufferUI']
+from .base_ui.base_ui import BaseUI
+from .fb_ui.fb_ui import FramebufferUI
