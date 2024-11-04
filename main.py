@@ -51,8 +51,6 @@ class InspectionSystem:
                 )
             
             self.processor = ImageProcessor(
-                api_key=self.roboflow_api_key,
-                model_id=self.roboflow_model_id,
                 status_callback=self.ui.update_status_message
             )
         except Exception as e:
