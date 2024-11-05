@@ -6,6 +6,9 @@
 SOLENOID_PIN = 14
 SENSOR_PIN = 20
 NEW_SENSOR_PIN = 21
+AI_TOGGLE_PIN = 16
+EJECTION_PIN=15
+
 
 # Timing Configuration
 SENSOR2_WAIT_TIME = 0.5    # seconds
@@ -22,7 +25,7 @@ NETWORK_CHECK_INTERVAL = 5  # seconds
 
 # Network Timeouts (in seconds)
 NETWORK_TIMEOUTS = {
-    'connect': 5,    # Time to establish connection
+    'connect': 10,    # Time to establish connection
     'read': 30,      # Time to receive data
 }
 

@@ -16,5 +16,6 @@ __all__ = [
     # Display
     'UI_REFRESH_RATE',
     'MAX_LOG_MESSAGES',
-    'VISIBLE_LOG_MESSAGES'
+    'VISIBLE_LOG_MESSAGES',
+    'AI_TOGGLE_PIN'
 ]

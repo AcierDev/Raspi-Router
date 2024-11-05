@@ -720,11 +720,13 @@ class FramebufferUI(BaseUI):
             y_offset += 5
 
     def _draw_sensor_status(self, gpio_controller, x, y):
-        """Draw sensor status with original styling"""
+        """Draw sensor status including AI toggle switch"""
         sensor_states = [
             ("Sensor 1", gpio_controller.read_sensor1()),
             ("Sensor 2", gpio_controller.read_sensor2()),
-            ("Solenoid", gpio_controller.get_solenoid_state())
+            ("Solenoid", gpio_controller.get_solenoid_state()),
+            ("Ejection", gpio_controller.get_ejection_state()),
+            ("AI Disabled", gpio_controller.read_ai_toggle_switch()),  # Inverted because True means AI is disabled
         ]
         
         for i, (name, state) in enumerate(sensor_states):
