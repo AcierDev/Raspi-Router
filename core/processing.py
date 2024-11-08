@@ -6,7 +6,9 @@ import json
 from io import BytesIO
 import tempfile
 import os
+import subprocess
 from config import INFERENCE_URL, NETWORK_TIMEOUTS
+import time
 
 class ImageProcessor:
     def __init__(self, status_callback=None):
@@ -15,9 +17,12 @@ class ImageProcessor:
         self.logger = logging.getLogger(__name__)
         self.last_predictions = None
         self.image_size = (3024, 3024)  # Default size, will be updated when processing
-        
-        # Create a temporary directory for image processing
         self.temp_dir = tempfile.mkdtemp()
+        
+        # ADB configuration
+        # Updated to use internal storage path instead of SD card
+        self.device_path = "/storage/emulated/0/DCIM/Camera"  # Internal storage path
+        self.local_path = self.temp_dir
         
         # Confidence thresholds
         self.CONFIDENCE_THRESHOLDS = {
@@ -26,12 +31,73 @@ class ImageProcessor:
             'low': 0.50
         }
 
-    def get_image(self, image_url: str) -> Optional[bytes]:
-        """Capture image from camera"""
-        self.update_status("Initiating image capture", is_network=True)
-        
+    def _capture_via_adb(self) -> Optional[bytes]:
+        """Attempt to capture image using ADB"""
         try:
-            self.update_status("Opening connection to camera...", is_network=True)
+            self.update_status("Initiating ADB image capture...")
+            
+            # Generate unique filename with known pattern
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            filename = f"capture_{timestamp}.jpg"
+            remote_file = f"{self.device_path}/{filename}"
+            local_file = os.path.join(self.local_path, filename)
+            
+            # Simplified capture sequence
+            self.update_status("Capturing image via ADB...")
+            
+            capture_commands = (
+                f"am force-stop com.android.camera && "
+                f"am start -a android.media.action.STILL_IMAGE_CAMERA --ez android.intent.extra.QUICK_CAPTURE true && "
+                f"sleep 1.5 && "
+                f"input keyevent 24 && "  # KEYCODE_VOLUME_UP
+                f"sleep 1 && "
+                f"am force-stop com.android.camera"
+            )
+            
+            subprocess.run(["adb", "shell", capture_commands], 
+                        capture_output=True, check=True)
+            
+            # Simple ls command to list files
+            list_cmd = f"ls -t {self.device_path}/*.jpg | head -1"
+            result = subprocess.run(["adb", "shell", list_cmd],
+                                capture_output=True, text=True, check=True)
+            
+            latest_file = result.stdout.strip()
+            if not latest_file:
+                raise Exception("No jpg files found in camera directory")
+            
+            # Pull the file
+            self.update_status("Transferring image from device...")
+            pull_cmd = ["adb", "pull", latest_file, local_file]
+            subprocess.run(pull_cmd, capture_output=True, text=True, check=True)
+            
+            # Read file
+            with open(local_file, 'rb') as f:
+                image_data = f.read()
+            
+            # Clean up
+            os.remove(local_file)
+            
+            if len(image_data) < 100:
+                raise ValueError(f"Suspiciously small image data: {len(image_data)} bytes")
+            
+            self.update_status(f"ADB capture complete: {len(image_data)/1024:.1f} KB")
+            return image_data
+            
+        except subprocess.CalledProcessError as e:
+            error_msg = e.stderr.decode() if e.stderr else str(e)
+            self.logger.error(f"ADB command failed: {error_msg}", exc_info=True)
+            self.update_status(f"ADB capture failed: {error_msg}")
+            return None
+        except Exception as e:
+            self.logger.error(f"ADB capture failed: {str(e)}", exc_info=True)
+            self.update_status(f"ADB capture failed: {str(e)}")
+            return None
+
+    def _capture_via_network(self, image_url: str) -> Optional[bytes]:
+        """Fallback method to capture image via network request"""
+        try:
+            self.update_status("Attempting network image capture...", is_network=True)
             
             response = requests.get(
                 image_url, 
@@ -39,26 +105,37 @@ class ImageProcessor:
             )
             response.raise_for_status()
             
-            self.update_status("Connected to camera, starting image transfer...", is_network=True)
-            
-            # Verify content type is an image
+            # Verify content type
             content_type = response.headers.get('content-type', '')
             if not content_type.startswith('image/'):
                 raise ValueError(f"Invalid content type: {content_type}")
-                
+            
             image_data = response.content
             
-            # Verify we got actual image data
-            if len(image_data) < 100:  # Basic sanity check
+            # Verify image data
+            if len(image_data) < 100:
                 raise ValueError(f"Suspiciously small image data: {len(image_data)} bytes")
-                
-            self.update_status(f"Image download complete: {len(image_data)/1024:.1f} KB", is_network=True)
+            
+            self.update_status(f"Network image capture complete: {len(image_data)/1024:.1f} KB", is_network=True)
             return image_data
             
         except Exception as e:
-            self.logger.error(f"Error during image capture: {str(e)}", exc_info=True)
-            self.update_status(f"Error during image capture: {str(e)}", is_network=True)
+            self.logger.error(f"Network capture failed: {str(e)}", exc_info=True)
+            self.update_status(f"Network capture failed: {str(e)}", is_network=True)
             return None
+
+    def get_image(self, image_url: str) -> Optional[bytes]:
+        """Capture image, trying ADB first then falling back to network request"""
+        self.update_status("Starting image capture process...")
+        
+        # First attempt: ADB capture
+        image_data = self._capture_via_adb()
+        if image_data:
+            return image_data
+            
+        # Fallback: Network capture
+        self.update_status("ADB capture failed, falling back to network capture...")
+        return self._capture_via_network(image_url)
 
     def analyze_image(self, image_data: bytes) -> Optional[Dict[str, Any]]:
         """

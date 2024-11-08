@@ -3,5 +3,5 @@
 from .hardware import GPIOController
 from .network import NetworkManager
 from .processing import ImageProcessor
-
-__all__ = ['GPIOController', 'NetworkManager', 'ImageProcessor', 'EnhancedInspectionSystem']
+from .controller import InspectionController
+from .metrics import MetricsManager

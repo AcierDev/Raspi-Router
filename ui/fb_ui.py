@@ -633,13 +633,13 @@ class FramebufferUI(BaseUI):
             metrics_y = self._draw_metrics_section(10, 70, self.ui_width - 20)
             
             # Draw network status
-            net_y = self._draw_section("Network Status", "", 10, metrics_y + 10, 
+            net_y = self._draw_section("Network Status", "", 10, metrics_y + 50, 
                                      self.ui_width - 20, 180)
             self._draw_network_status(network_status, 20, net_y)
             
             # Draw sensor status
             sensor_y = self._draw_section("Sensor Status", "", 10, net_y + 190, 
-                                        self.ui_width - 20, 100)
+                                        self.ui_width - 20, 140)
             self._draw_sensor_status(gpio_controller, 20, sensor_y)
             
             # Draw alert if present
