@@ -1,0 +1,67 @@
+{
+  "globalSettings": {
+    "ejectionDuration": 4200,
+    "requireMultipleDefects": false,
+    "minTotalArea": 1,
+    "maxDefectsBeforeEject": 1
+  },
+  "perClassSettings": {
+    "corner": {
+      "enabled": true,
+      "minConfidence": 0.06,
+      "minArea": 1,
+      "maxCount": 1
+    },
+    "crack": {
+      "enabled": true,
+      "minConfidence": 0.01,
+      "minArea": 1,
+      "maxCount": 1
+    },
+    "damage": {
+      "enabled": true,
+      "minConfidence": 0.01,
+      "minArea": 1,
+      "maxCount": 1
+    },
+    "edge": {
+      "enabled": true,
+      "minConfidence": 0.02,
+      "minArea": 1,
+      "maxCount": 1
+    },
+    "knot": {
+      "enabled": true,
+      "minConfidence": 0.01,
+      "minArea": 1,
+      "maxCount": 1
+    },
+    "router": {
+      "enabled": true,
+      "minConfidence": 0.03,
+      "minArea": 1,
+      "maxCount": 1
+    },
+    "side": {
+      "enabled": true,
+      "minConfidence": 0.05,
+      "minArea": 1,
+      "maxCount": 1
+    },
+    "tearout": {
+      "enabled": true,
+      "minConfidence": 0.02,
+      "minArea": 1,
+      "maxCount": 1
+    }
+  },
+  "advancedSettings": {
+    "considerOverlap": false,
+    "regionOfInterest": {
+      "x": 0,
+      "y": 0,
+      "width": 274,
+      "height": 200
+    }
+  }
+}

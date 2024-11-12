@@ -6,8 +6,13 @@ import { WebSocket, WebSocketServer } from "ws";
 import { CameraController } from "./camera-controller";
 import { RouterController } from "./router-control";
 import { IGpio } from "./gpio-factory";
-
+import { LogEntry, EjectionSettings, PresetSettings } from "./types";
 import fs from "fs/promises";
+
+interface WebSocketMessage {
+  type: string;
+  data: any;
+}
 
 export class MonitoringServer {
   private wss: WebSocketServer;
@@ -31,7 +36,7 @@ export class MonitoringServer {
     console.log("📡 WebSocket server created with path: /ws");
 
     this.camera = new CameraController();
-    this.router = new RouterController(gpioFactory);
+    this.router = new RouterController(gpioFactory, this.camera);
 
     this.setupWebSocket();
     this.setupRouterEvents();
@@ -42,7 +47,7 @@ export class MonitoringServer {
       this.wss.clients.forEach((client) => {
         if (client.readyState === WebSocket.OPEN) {
           client.ping();
-          console.log("❤️ Ping sent to client");
+          //console.log("❤️ Ping sent to client");
         }
       });
     }, 30000);
@@ -70,19 +75,46 @@ export class MonitoringServer {
         solenoid: this.router.getSolenoidState(),
         deviceConnected: false,
         lastPhotoPath: null,
+        isCapturingImage: false,
+        ejectionSettings: this.router.getEjectionSettings(),
       };
 
-      console.log("📤 Sending initial state:", initialState);
+      //console.log("📤 Sending initial state:", initialState);
       ws.send(JSON.stringify(initialState));
 
       // Handle incoming messages
       ws.on("message", (data) => {
-        console.log("📥 Received message from client:", data.toString());
+        try {
+          const message: WebSocketMessage = JSON.parse(data.toString());
+          //console.log("📥 Received message from client:", message);
+
+          switch (message.type) {
+            case "updateEjectionSettings":
+              this.handleEjectionSettingsUpdate(message.data);
+              break;
+            case "applyEjectionPreset":
+              this.handleEjectionPreset(message.data);
+              break;
+            case "getEjectionSettings":
+              this.sendEjectionSettings(ws);
+              break;
+            default:
+              console.log("📥 Unhandled message type:", message.type);
+          }
+        } catch (error) {
+          console.error("Error processing WebSocket message:", error);
+          ws.send(
+            JSON.stringify({
+              type: "error",
+              data: "Invalid message format",
+            })
+          );
+        }
       });
 
       // Handle pong responses
       ws.on("pong", () => {
-        console.log("💓 Received pong from client");
+        //console.log("💓 Received pong from client");
       });
 
       ws.on("close", (code, reason) => {
@@ -114,85 +146,161 @@ export class MonitoringServer {
     // Serve photos
     app.use("/api/photos", express.static(path.join(process.cwd(), "photos")));
 
-    // Health check endpoint
-    app.get("/api/health", async (req, res) => {
-      const deviceConnected = await this.camera.checkDeviceConnection();
-      res.json({
-        status: "healthy",
-        deviceConnected,
-        sensor1: this.router.getSensor1State(),
-        sensor2: this.router.getSensor2State(),
-        solenoid: this.router.getSolenoidState(),
-      });
-    });
-
     // Handle all other routes - Important for client-side routing
     app.get("*", (req, res) => {
       res.sendFile(path.join(process.cwd(), "public", "index.html"));
     });
   }
 
-  private async setupRouterEvents(): Promise<void> {
-    // State updates
+  private async handleEjectionSettingsUpdate(
+    settings: Partial<EjectionSettings>
+  ): Promise<void> {
+    try {
+      await this.router.updateEjectionSettings(settings);
+
+      // Broadcast the new settings to all clients
+      this.broadcast(
+        "ejectionSettingsUpdated",
+        this.router.getEjectionSettings()
+      );
+
+      // Log the update
+      const logEntry: LogEntry = {
+        timestamp: new Date().toISOString(),
+        level: "info",
+        message: "Ejection settings updated",
+      };
+      this.broadcast("systemLog", logEntry);
+    } catch (error) {
+      console.error("Error updating ejection settings:", error);
+      const logEntry: LogEntry = {
+        timestamp: new Date().toISOString(),
+        level: "error",
+        message: "Failed to update ejection settings",
+      };
+      this.broadcast("systemLog", logEntry);
+    }
+  }
+
+  private async handleEjectionPreset(preset: PresetSettings): Promise<void> {
+    try {
+      await this.router.applyEjectionPreset(preset);
+
+      // Broadcast the new settings to all clients
+      this.broadcast(
+        "ejectionSettingsUpdated",
+        this.router.getEjectionSettings()
+      );
+
+      // Log the preset application
+      const logEntry: LogEntry = {
+        timestamp: new Date().toISOString(),
+        level: "info",
+        message: `Applied ${preset} ejection preset`,
+      };
+      this.broadcast("systemLog", logEntry);
+    } catch (error) {
+      console.error("Error applying ejection preset:", error);
+      const logEntry: LogEntry = {
+        timestamp: new Date().toISOString(),
+        level: "error",
+        message: "Failed to apply ejection preset",
+      };
+      this.broadcast("systemLog", logEntry);
+    }
+  }
+
+  private sendEjectionSettings(ws: WebSocket): void {
+    const settings = this.router.getEjectionSettings();
+    ws.send(
+      JSON.stringify({
+        type: "ejectionSettings",
+        data: settings,
+      })
+    );
+  }
+
+  private setupRouterEvents(): void {
+    // Handle state updates
     this.router.on("stateUpdate", (state) => {
-      this.broadcastState(state);
+      this.broadcast("stateUpdate", state);
     });
 
-    // Image capture handling
-    this.router.on("startImageCapture", async () => {
+    // Handle System logs
+    this.router.on("systemLog", (log: LogEntry) => {
+      this.broadcast("systemLog", log);
+    });
+
+    // Handle image capture events - now immediately sends the image
+    this.router.on("imageCaptured", async (imageData) => {
       try {
-        const deviceConnected = await this.camera.checkDeviceConnection();
-        if (deviceConnected) {
-          const photoPath = await this.camera.takePhoto();
+        const imageBuffer = await fs.readFile(imageData.path);
+        const metadata = {
+          type: "image",
+          filename: path.basename(imageData.path),
+          mimeType: "image/jpeg",
+          timestamp: imageData.timestamp,
+          size: imageBuffer.length,
+          analysis: null, // No analysis yet
+          storedLocations: null,
+        };
 
-          // Create a binary message with a header to identify the message type
-          const imageBuffer = await fs.readFile(photoPath);
-          const metadata = {
-            type: "image",
-            filename: path.basename(photoPath),
-            mimeType: "image/jpeg",
-            timestamp: new Date().toISOString(),
-            size: imageBuffer.length,
-          };
+        // Send metadata first
+        this.broadcast("imageMetadata", metadata);
 
-          // Send metadata first
-          this.broadcast("imageMetadata", metadata);
+        // Then send the image buffer
+        this.connectedClients.forEach((client) => {
+          if (client.readyState === WebSocket.OPEN) {
+            client.send(imageBuffer);
+          }
+        });
+      } catch (error) {
+        console.error("Error sending image data:", error);
+      }
+    });
 
-          // Send the binary image data to each client
-          this.connectedClients.forEach((client) => {
-            if (client.readyState === WebSocket.OPEN) {
-              try {
-                client.send(imageBuffer);
-              } catch (error) {
-                console.error("Error sending image data:", error);
-              }
-            }
-          });
+    // Handle analysis completion separately
+    this.router.on("analysisComplete", (analysisData) => {
+      try {
+        // If we have analysis results, broadcast them with normalized format
+        if (analysisData.analysis?.predictions) {
+          const normalizedPredictions = analysisData.analysis.predictions.map(
+            (pred) => ({
+              class_name: pred.class_name,
+              confidence: pred.confidence,
+              detection_id: pred.detection_id,
+              bbox: {
+                x1: pred.bbox[0],
+                y1: pred.bbox[1],
+                x2: pred.bbox[2],
+                y2: pred.bbox[3],
+              },
+            })
+          );
 
-          this.router.imageCaptureComplete(true);
-        } else {
-          this.router.imageCaptureComplete(false);
-          this.broadcast("alert", {
-            type: "error",
-            message: "Camera device not connected",
-            timestamp: new Date().toISOString(),
+          this.broadcast("analysisResults", {
+            filename: path.basename(analysisData.path),
+            timestamp: analysisData.timestamp,
+            predictions: normalizedPredictions,
+            storedLocations: analysisData.storedLocations,
+            processingTime: analysisData.processingTime,
+            foo: "five",
           });
         }
       } catch (error) {
-        this.router.imageCaptureComplete(false);
-        this.broadcast("alert", {
-          type: "error",
-          message: "Failed to capture image",
-          data: error,
-          timestamp: new Date().toISOString(),
-        });
+        console.error("Error sending analysis results:", error);
       }
+    });
+
+    // Handle alerts
+    this.router.on("alert", (alert) => {
+      this.broadcast("alert", alert);
     });
   }
 
   private broadcast(type: string, data: any): void {
     const message = JSON.stringify({ type, data });
-    console.log(`📢 Broadcasting ${type}:`, data);
+    //console.log(`📢 Broadcasting ${type}:`, data);
 
     this.connectedClients.forEach((client) => {
       if (client.readyState === WebSocket.OPEN) {
@@ -200,26 +308,6 @@ export class MonitoringServer {
           client.send(message);
         } catch (error) {
           console.error(`⚠️ Error broadcasting ${type} to client:`, error);
-        }
-      }
-    });
-  }
-
-  private broadcastState(state: any): void {
-    const message = JSON.stringify(state);
-    console.log(`📢 Broadcasting state update:`, state);
-
-    let successCount = 0;
-    let failCount = 0;
-
-    this.connectedClients.forEach((client) => {
-      if (client.readyState === WebSocket.OPEN) {
-        try {
-          client.send(message);
-          successCount++;
-        } catch (error) {
-          console.error("⚠️ Error broadcasting to client:", error);
-          failCount++;
         }
       }
     });

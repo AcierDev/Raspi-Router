@@ -3,7 +3,6 @@ import { exec } from "child_process";
 import { promisify } from "util";
 import fs from "fs/promises";
 import path from "path";
-import { RouterController } from "./router-control";
 
 const execAsync = promisify(exec);
 
@@ -17,8 +16,11 @@ interface CameraControllerConfig {
 export class CameraController extends EventEmitter {
   private readonly config: CameraControllerConfig;
   private isCapturing: boolean = false;
-  private lastConnectionCheck: number = 0;
-  private reconnectAttempts: number = 0;
+  private lastPhotoList: string[] = [];
+  private cameraPath: string | null = null;
+  private lastPhotoCheck: number = 0;
+  private photoCheckInterval: number = 100;
+  private lastKnownPhoto: string | null = null;
   private deviceStatus: "connected" | "disconnected" | "error" = "disconnected";
 
   constructor(config: Partial<CameraControllerConfig> = {}) {
@@ -59,25 +61,10 @@ export class CameraController extends EventEmitter {
     }, this.config.connectionCheckInterval);
   }
 
-  private async waitForDevice(timeout: number = 10000): Promise<boolean> {
-    const startTime = Date.now();
-    while (Date.now() - startTime < timeout) {
-      if (await this.checkDeviceConnection()) {
-        return true;
-      }
-      await new Promise((resolve) => setTimeout(resolve, 1000));
-    }
-    return false;
-  }
-
   async checkDeviceConnection(): Promise<boolean> {
     try {
       const { stdout } = await execAsync("adb devices");
       const isConnected = stdout.includes("device");
-
-      if (isConnected) {
-        this.reconnectAttempts = 0;
-      }
 
       return isConnected;
     } catch (error) {
@@ -130,108 +117,91 @@ export class CameraController extends EventEmitter {
   }
 
   private async findPhotoPath(): Promise<string> {
+    // Cache the camera path for the entire session
+    if (this.cameraPath) {
+      return this.cameraPath;
+    }
+
+    console.log("📁 Finding camera directory (one-time operation)...");
+
     try {
-      // Get storage volumes to find SD card UUID
+      // Store the UUID for the session
       const { stdout: storage } = await execAsync(
         'adb shell "sm list-volumes"'
       );
-      console.log("Storage volumes:", storage);
+      const match = storage.match(/public.*?mounted\s+([A-F0-9-]+)/i);
 
-      // Parse the UUID from the public volume
-      const publicVolume = storage
-        .split("\n")
-        .find((line) => line.includes("public:"));
-
-      if (!publicVolume) {
-        throw new Error("Could not find public storage volume");
-      }
-
-      const match = publicVolume.match(/mounted\s+([A-F0-9-]+)/i);
       if (!match) {
-        throw new Error("Could not parse storage UUID");
+        throw new Error("Could not find storage UUID");
       }
 
-      const uuid = match[1];
-      const cameraPath = `/storage/${uuid}/DCIM/Camera`;
+      this.cameraPath = `/storage/${match[1]}/DCIM/Camera`;
+      await execAsync(`adb shell "ls -d ${this.cameraPath}"`);
 
-      console.log(`Using camera path: ${cameraPath}`);
-
-      // Verify the path exists
-      const { stdout: pathCheck } = await execAsync(
-        `adb shell "ls -la ${cameraPath}"`
-      );
-      if (!pathCheck) {
-        throw new Error(`Camera path ${cameraPath} not accessible`);
-      }
-
-      return cameraPath;
+      return this.cameraPath;
     } catch (error) {
-      console.error("Error finding photo path:", error);
+      console.error("❌ Storage volume method failed:", error);
       throw error;
     }
   }
 
-  private async executeCameraCommand(filepath: string): Promise<void> {
+  private async getCurrentPhotos(): Promise<string[]> {
+    const now = Date.now();
+    if (now - this.lastPhotoCheck < this.photoCheckInterval) {
+      return this.lastPhotoList;
+    }
+
+    this.lastPhotoCheck = now;
+
     try {
-      const cameraPath = await this.findPhotoPath();
-      console.log("Using camera path:", cameraPath);
-
-      // Get initial file list
-      const { stdout: initialFiles } = await execAsync(
-        `adb shell "ls -la ${cameraPath}"`
+      // Use a more efficient command that only gets jpg files
+      const { stdout } = await execAsync(
+        `adb shell "cd ${await this.findPhotoPath()} && ls -t *.jpg 2>/dev/null | head -n 1"`
       );
-      console.log("Initial files in camera directory:", initialFiles);
 
-      // Start camera app
-      console.log("Starting camera app...");
-      await Promise.race([
-        execAsync(
-          "adb shell am start -a android.media.action.STILL_IMAGE_CAPTURE"
-        ),
-        new Promise((_, reject) =>
-          setTimeout(() => reject(new Error("Camera start timeout")), 5000)
-        ),
-      ]);
-
-      // Wait for camera to stabilize
-      await new Promise((resolve) => setTimeout(resolve, 2000));
-
-      // Take photo
-      console.log("Taking photo...");
-      await Promise.race([
-        execAsync("adb shell input keyevent KEYCODE_CAMERA"),
-        new Promise((_, reject) =>
-          setTimeout(() => reject(new Error("Shutter timeout")), 3000)
-        ),
-      ]);
-
-      // Wait for photo to be saved
-      console.log("Waiting for photo to be saved...");
-      await new Promise((resolve) => setTimeout(resolve, 4000));
-
-      // Get list of files sorted by modification time
-      const { stdout: newMostRecent } = await execAsync(
-        `adb shell "ls -t ${cameraPath} | head -n 1"`
-      );
-      const latestPhoto = newMostRecent.trim();
-
-      if (!latestPhoto) {
-        throw new Error("No photos found after capture");
+      const latestPhoto = stdout.trim();
+      if (latestPhoto) {
+        const fullPath = `${this.cameraPath}/${latestPhoto}`;
+        this.lastPhotoList = [fullPath];
+        return [fullPath];
       }
 
-      console.log("Most recent photo:", latestPhoto);
-
-      // Pull the file
-      const fullPath = `${cameraPath}/${latestPhoto}`;
-      console.log(`Pulling file from: ${fullPath}`);
-      await execAsync(`adb pull "${fullPath}" "${filepath}"`);
-
-      // Verify the transfer
-      await this.verifyPhotoCapture(filepath);
+      return this.lastPhotoList;
     } catch (error) {
-      console.error("Error in executeCameraCommand:", error);
-      throw error;
+      return this.lastPhotoList;
     }
+  }
+
+  private async waitForNewPhoto(): Promise<string | null> {
+    const startTime = Date.now();
+    const timeout = 3000; // Reduced from 5000ms
+
+    const initialPhoto = (await this.getCurrentPhotos())[0];
+    let checkCount = 0;
+
+    while (Date.now() - startTime < timeout) {
+      checkCount++;
+      const currentPhoto = (await this.getCurrentPhotos())[0];
+
+      if (
+        currentPhoto &&
+        currentPhoto !== initialPhoto &&
+        currentPhoto !== this.lastKnownPhoto
+      ) {
+        console.log(
+          `✅ New photo detected after ${checkCount} checks:`,
+          currentPhoto
+        );
+        this.lastKnownPhoto = currentPhoto;
+        return currentPhoto;
+      }
+
+      await new Promise((resolve) =>
+        setTimeout(resolve, this.photoCheckInterval)
+      );
+    }
+
+    return null;
   }
 
   async takePhoto(): Promise<string> {
@@ -239,57 +209,43 @@ export class CameraController extends EventEmitter {
       throw new Error("Camera is busy capturing an image");
     }
 
-    if (!(await this.waitForDevice())) {
-      throw new Error("Camera device not connected or not responding");
-    }
+    console.log("📸 Starting photo capture process...");
 
     this.isCapturing = true;
-    const timestamp = new Date().toISOString().replace(/[:.]/g, "-");
+    const timestamp = Date.now();
     const filename = `photo_${timestamp}.jpg`;
     const filepath = path.join(this.config.photosDir, filename);
 
     try {
-      console.log("Starting photo capture process...");
+      // Get initial state
+      const initialPhoto = (await this.getCurrentPhotos())[0];
+      this.lastPhotoList = initialPhoto ? [initialPhoto] : [];
 
-      // Kill any existing camera processes
-      await execAsync("adb shell am force-stop com.android.camera");
-      await execAsync("adb shell am force-stop com.android.camera2");
+      // Trigger capture
+      await execAsync("adb shell input keyevent KEYCODE_CAMERA");
 
-      // Ensure camera path exists
-      const cameraPath = await this.findPhotoPath();
-      await execAsync(`adb shell "mkdir -p ${cameraPath}"`);
+      // Wait for new photo
+      const newPhoto = await this.waitForNewPhoto();
+      if (!newPhoto) {
+        throw new Error("No new photo detected after capture");
+      }
 
-      // Take the photo
-      await this.executeCameraCommand(filepath);
+      // Pull the file
+      await execAsync(`adb pull "${newPhoto}" "${filepath}"`);
+
+      // Quick validation
+      const stats = await fs.stat(filepath);
+      if (stats.size < 1000) {
+        throw new Error("Captured photo appears to be corrupt");
+      }
 
       this.isCapturing = false;
       this.emit("photoTaken", filepath);
+
       return filepath;
     } catch (error) {
       this.isCapturing = false;
-      throw this.enhanceError(error);
-    }
-  }
-
-  private async verifyPhotoCapture(filepath: string): Promise<void> {
-    try {
-      const stats = await fs.stat(filepath);
-      if (stats.size < 1000) {
-        // Photo should be at least 1KB
-        throw new Error("Captured photo appears to be corrupt or incomplete");
-      }
-
-      // Try to verify it's a valid JPEG
-      const buffer = await fs.readFile(filepath, { flag: "r" });
-      if (buffer[0] !== 0xff || buffer[1] !== 0xd8) {
-        // JPEG magic numbers
-        throw new Error("File is not a valid JPEG image");
-      }
-    } catch (error) {
-      if (error instanceof Error) {
-        throw new Error(`Failed to verify photo capture: ${error.message}`);
-      }
-      throw new Error("Failed to verify photo capture");
+      throw error instanceof Error ? error : new Error("Unknown camera error");
     }
   }
 }
