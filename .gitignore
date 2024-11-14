@@ -1,0 +1,80 @@
+# Node modules
+node_modules/
+
+# Logs
+logs
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+
+# OS generated files
+.DS_Store
+Thumbs.db
+
+# Environment variables
+.env
+.env.*.local
+
+# Build and output directories
+dist/
+build/
+out/
+coverage/
+
+# TypeScript
+*.tsbuildinfo
+
+# Cache files
+.cache/
+.parcel-cache/
+.next/
+.svelte-kit/
+.vite/
+.vscode/
+
+# Testing
+coverage/
+.jest/
+nyc_output/
+*.snap
+
+# Editor directories and files
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# ESLint and Prettier
+.eslintcache
+.prettiercache
+
+# Storybook files
+.storybook-out/
+storybook-static/
+
+# VS Code settings
+.vscode/*
+
+# TypeScript declaration files
+*.d.ts
+
+# Optional npm cache directory
+.npm/
+
+# Optional REPL history
+.node_repl_history
+
+# Yarn Integrity
+.yarn-integrity
+
+# macOS metadata files
+.DS_Store
+
+# Other package managers
+.pnp/
+.pnp.js
+
+# IDEs
+.idea/

@@ -2,7 +2,7 @@
 import express from "express";
 import http from "http";
 import { MonitoringServer } from "./server";
-import { createRealGpioFactory } from "./gpio-factory";
+import { createGpioFactory } from "./gpio-factory";
 import { RouterSimulator } from "./router-simulator";
 
 async function startApplication(isSimulation: boolean = false) {
@@ -12,7 +12,7 @@ async function startApplication(isSimulation: boolean = false) {
     const server = http.createServer(app);
 
     // Initialize GPIO factory
-    const gpioFactory = await createRealGpioFactory();
+    const gpioFactory = await createGpioFactory();
 
     // Create monitoring server
     const monitoring = new MonitoringServer(app, server, gpioFactory);

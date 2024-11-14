@@ -36,9 +36,10 @@ export class MonitoringServer {
     console.log("📡 WebSocket server created with path: /ws");
 
     this.camera = new CameraController();
-    this.router = new RouterController(
+    this.router = await RouterController.create(
       gpioFactory,
       this.camera,
+      '"ejection-config.json"',
       20,
       21,
       14,
@@ -77,9 +78,9 @@ export class MonitoringServer {
 
       // Send initial state
       const initialState = {
-        sensor1: this.router.getSensor1State(),
-        sensor2: this.router.getSensor2State(),
-        solenoid: this.router.getSolenoidState(),
+        sensor1: this.router.sensorMonitor.getSensor1State(),
+        sensor2: this.router.sensorMonitor.getSensor2State(),
+        solenoid: this.router.sensorMonitor.getSolenoidState(),
         deviceConnected: false,
         lastPhotoPath: null,
         isCapturingImage: false,

@@ -1,5 +1,4 @@
 import fs from "fs";
-import { Gpio } from "onoff";
 
 export interface IGpio {
   readSync(): number;
@@ -136,6 +135,7 @@ export const createRealGpioFactory = async () => {
   console.log(`[GPIO] Using base offset: ${baseOffset}`);
 
   return (pin: number, direction: string, edge?: string): IGpio => {
+    const { Gpio } = require("onoff");
     const adjustedPin = baseOffset + pin;
     console.log(`[GPIO] Creating new real GPIO instance:
     Original Pin: ${pin}
@@ -150,22 +150,22 @@ export const createRealGpioFactory = async () => {
     return {
       readSync: () => {
         const value = realGpio.readSync();
-        //console.log(`[GPIO ${adjustedPin}] Read value=${value}`);
-        return value == 1 ? 0 : 1;
+        console.log(`[GPIO ${adjustedPin}] Read value=${value}`);
+        return value;
       },
       writeSync: (value: number) => {
-        // console.log(`[GPIO ${adjustedPin}] Writing value=${value}`);
-        realGpio.writeSync(value == 1 ? 0 : 1);
+        console.log(`[GPIO ${adjustedPin}] Writing value=${value}`);
+        realGpio.writeSync(value);
       },
       watch: (callback: (err: Error | null, value: number) => void) => {
         console.log(`[GPIO ${adjustedPin}] Setting up watch`);
         realGpio.watch((err, value) => {
-          // console.log(
-          //   `[GPIO ${adjustedPin}] Watch triggered: value=${value}${
-          //     err ? ", error=" + err : ""
-          //   }`
-          // );
-          callback(err, value == 1 ? 0 : 1);
+          console.log(
+            `[GPIO ${adjustedPin}] Watch triggered: value=${value}${
+              err ? ", error=" + err : ""
+            }`
+          );
+          callback(err, value);
         });
       },
       unexport: () => {

@@ -16,13 +16,14 @@ export class EjectionControl extends EventEmitter {
   private configManager: ConfigurationManager;
 
   constructor(
-    gpioFactory: (pin: number, direction: string) => IGpio,
+    gpioFactory: (pin: number, direction: string, edge?: string) => IGpio,
     pin: number,
     configManager: ConfigurationManager
   ) {
     super();
     this.ejectionSolenoid = gpioFactory(pin, "out");
     this.configManager = configManager;
+    // Now we can safely get the config since the manager is initialized
     this.config = this.configManager.getConfig();
     this.ejectionSolenoid.writeSync(0);
     console.log(`[EjectionControl] Initialized with pin ${pin}`);
