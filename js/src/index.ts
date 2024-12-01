@@ -4,12 +4,15 @@ import http from "http";
 import { MonitoringServer } from "./server";
 import { createRealGpioFactory } from "./gpio-factory";
 import { RouterSimulator } from "./router-simulator";
+import { stateManager } from "./config/ConfigManager";
 
 async function startApplication(isSimulation: boolean = false) {
   try {
     // Create express app and server
     const app = express();
     const server = http.createServer(app);
+
+    await stateManager.initialize();
 
     // Initialize GPIO factory
     const gpioFactory = await createRealGpioFactory();

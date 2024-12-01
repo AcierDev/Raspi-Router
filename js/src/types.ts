@@ -55,10 +55,10 @@ export interface DefectClassConfig {
 }
 
 export interface SystemState {
-  sensor1: boolean;
-  sensor2: boolean;
-  solenoid: boolean;
-  ejection: boolean;
+  sensor1: IODevice;
+  piston: IODevice;
+  ejector: IODevice;
+  riser: IODevice;
   isProcessing: boolean;
   lastPhotoPath: string | null;
   deviceConnected: boolean;
@@ -68,7 +68,10 @@ export interface SystemState {
     reason: string;
     details: any;
   };
-  ejectionSettings: EjectionSettings;
+}
+
+export interface IODevice {
+  active: boolean;
 }
 
 export type ClassName =
@@ -81,14 +84,16 @@ export type ClassName =
   | "side"
   | "tearout";
 
-export interface RegionOfInterest {
+export interface Region {
   x: number;
   y: number;
   width: number;
   height: number;
+  type: "roi" | "exclusion";
+  id: string;
 }
 
-export interface EjectionSettings {
+export interface RouterSettings {
   globalSettings: GlobalSettings;
   perClassSettings: PerClassSettings;
   advancedSettings: AdvancedSettings;
@@ -99,6 +104,8 @@ export interface GlobalSettings {
   requireMultipleDefects: boolean;
   minTotalArea: number;
   maxDefectsBeforeEject: number;
+  pistonDuration: number;
+  riserDuration: number;
 }
 
 export type PerClassSettings = {
@@ -112,7 +119,8 @@ export type PerClassSettings = {
 
 export type AdvancedSettings = {
   considerOverlap: boolean;
-  regionOfInterest: RegionOfInterest;
+  regionOfInterest: Region;
+  exclusionZones: Region[];
 };
 
 export type PresetSettings = "High" | "Medium" | "Low";

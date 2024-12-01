@@ -1,58 +1,60 @@
 {
   "globalSettings": {
-    "ejectionDuration": 4200,
+    "ejectionDuration": 1000,
     "requireMultipleDefects": false,
-    "minTotalArea": 1,
-    "maxDefectsBeforeEject": 1
+    "minTotalArea": 100,
+    "maxDefectsBeforeEject": 5,
+    "riserDuration": 4200,
+    "pistonDuration": 6400
   },
   "perClassSettings": {
     "corner": {
       "enabled": true,
-      "minConfidence": 0.06,
-      "minArea": 1,
-      "maxCount": 1
+      "minConfidence": 0.5,
+      "minArea": 100,
+      "maxCount": 3
     },
     "crack": {
       "enabled": true,
-      "minConfidence": 0.01,
-      "minArea": 1,
-      "maxCount": 1
+      "minConfidence": 0.5,
+      "minArea": 100,
+      "maxCount": 3
     },
     "damage": {
       "enabled": true,
-      "minConfidence": 0.01,
-      "minArea": 1,
-      "maxCount": 1
+      "minConfidence": 0.5,
+      "minArea": 100,
+      "maxCount": 3
     },
     "edge": {
       "enabled": true,
-      "minConfidence": 0.02,
-      "minArea": 1,
-      "maxCount": 1
+      "minConfidence": 0.5,
+      "minArea": 100,
+      "maxCount": 3
     },
     "knot": {
       "enabled": true,
-      "minConfidence": 0.01,
-      "minArea": 1,
-      "maxCount": 1
+      "minConfidence": 0.5,
+      "minArea": 100,
+      "maxCount": 3
     },
     "router": {
       "enabled": true,
-      "minConfidence": 0.03,
-      "minArea": 1,
-      "maxCount": 1
+      "minConfidence": 0.5,
+      "minArea": 100,
+      "maxCount": 3
     },
     "side": {
       "enabled": true,
-      "minConfidence": 0.05,
-      "minArea": 1,
-      "maxCount": 1
+      "minConfidence": 0.5,
+      "minArea": 100,
+      "maxCount": 3
     },
     "tearout": {
       "enabled": true,
-      "minConfidence": 0.02,
-      "minArea": 1,
-      "maxCount": 1
+      "minConfidence": 0.5,
+      "minArea": 100,
+      "maxCount": 3
     }
   },
   "advancedSettings": {
@@ -60,8 +62,10 @@
     "regionOfInterest": {
       "x": 0,
       "y": 0,
-      "width": 274,
-      "height": 200
+      "width": 100,
+      "height": 100
     }
-  }
+  },
+  "ejectionDuration": 2700,
+  "requireMultipleDefects": true
 }

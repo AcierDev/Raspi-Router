@@ -1,13 +1,13 @@
 import fs from "fs";
-import { Gpio } from "onoff";
+import { BinaryValue, Direction, Edge, Gpio } from "onoff";
 
 export interface IGpio {
   readSync(): number;
   writeSync(value: number): void;
   watch(callback: (err: Error | null, value: number) => void): void;
   unexport(): void;
-  getPin(): number; // Add method to get pin number for logging
-  getDirection(): string; // Add method to get direction for logging
+  getPin(): number;
+  getDirection(): string;
 }
 
 class MockGpio implements IGpio {
@@ -40,11 +40,11 @@ class MockGpio implements IGpio {
       console.log(
         `[GPIO ${this.pin}] Read value=${this.value} (count=${this.readCount}, interval=${timeSinceLastRead}ms)`
       );
-      this.readCount = 0; // Reset counter after logging
+      this.readCount = 0;
     }
 
     this.lastReadTime = now;
-    return this.value;
+    return this.value == 1 ? 0 : 1;
   }
 
   writeSync(value: number): void {
@@ -52,21 +52,27 @@ class MockGpio implements IGpio {
     const timeSinceLastWrite = now - this.lastWriteTime;
     this.writeCount++;
 
-    // Always log writes since they're typically less frequent
-    console.log(
-      `[GPIO ${this.pin}] Write value=${value} (previous=${this.value}, interval=${timeSinceLastWrite}ms)`
-    );
-
     if (this.value !== value) {
-      console.log(`[GPIO ${this.pin}] State change: ${this.value} -> ${value}`);
+      // console.log(
+      //   `[GPIO ${this.pin}] State change detected:
+      //   Previous State: ${this.value}
+      //   New State: ${value}
+      //   Time Since Last Write: ${timeSinceLastWrite}ms
+      //   Timestamp: ${new Date().toISOString()}`
+      // );
+
       this.value = value;
       this.callbacks.forEach((cb) => {
         try {
-          cb(null, value);
+          cb(null, value == 1 ? 0 : 1);
         } catch (err) {
           console.error(`[GPIO ${this.pin}] Callback error:`, err);
         }
       });
+    } else {
+      console.log(
+        `[GPIO ${this.pin}] Write value=${value} (no state change, interval=${timeSinceLastWrite}ms)`
+      );
     }
 
     this.lastWriteTime = now;
@@ -99,7 +105,6 @@ class MockGpio implements IGpio {
 
 async function getGpioOffset(): Promise<number> {
   try {
-    // Read the base value from gpiochip512
     const base = parseInt(
       fs.readFileSync("/sys/class/gpio/gpiochip512/base").toString()
     );
@@ -107,7 +112,7 @@ async function getGpioOffset(): Promise<number> {
     return base;
   } catch (err) {
     console.log("[GPIO] Using default offset of 512 (RPi 5)", err);
-    return 512; // Default fallback for RPi 5
+    return 512;
   }
 }
 
@@ -135,9 +140,15 @@ export const createRealGpioFactory = async () => {
   const baseOffset = await getGpioOffset();
   console.log(`[GPIO] Using base offset: ${baseOffset}`);
 
-  return (pin: number, direction: string, edge?: string): IGpio => {
+  return (
+    pin: number,
+    direction: Direction,
+    edge?: Edge,
+    name?: string
+  ): IGpio => {
     const adjustedPin = baseOffset + pin;
     console.log(`[GPIO] Creating new real GPIO instance:
+    Name: ${name}
     Original Pin: ${pin}
     Adjusted Pin: ${adjustedPin}
     Direction: ${direction}
@@ -145,31 +156,46 @@ export const createRealGpioFactory = async () => {
     Timestamp: ${new Date().toISOString()}
     `);
 
-    // Wrap the real GPIO in a logging proxy
     const realGpio = new Gpio(adjustedPin, direction, edge);
+    let lastValue: number | null = null;
+
     return {
       readSync: () => {
-        const value = realGpio.readSync();
-        //console.log(`[GPIO ${adjustedPin}] Read value=${value}`);
-        return value == 1 ? 0 : 1;
+        const value = realGpio.readSync() == 1 ? 0 : 1;
+        return value;
       },
       writeSync: (value: number) => {
-        // console.log(`[GPIO ${adjustedPin}] Writing value=${value}`);
-        realGpio.writeSync(value == 1 ? 0 : 1);
+        const invertedValue = value == 1 ? 0 : 1;
+        if (lastValue !== value) {
+          console.log(
+            `[GPIO ${pin} - ${name}] State change detected:
+            Previous State: ${lastValue !== null ? lastValue : "initial"}
+            New State: ${invertedValue}
+            Timestamp: ${new Date().toISOString()}`
+          );
+          lastValue = invertedValue;
+        }
+        // console.log(`SETTING PIN: ${pin} to ${invertedValue}`);
+        realGpio.writeSync(invertedValue as BinaryValue);
       },
       watch: (callback: (err: Error | null, value: number) => void) => {
         console.log(`[GPIO ${adjustedPin}] Setting up watch`);
-        realGpio.watch((err, value) => {
-          // console.log(
-          //   `[GPIO ${adjustedPin}] Watch triggered: value=${value}${
-          //     err ? ", error=" + err : ""
-          //   }`
-          // );
-          callback(err, value == 1 ? 0 : 1);
+        realGpio.watch((err, gpioValue) => {
+          const value = gpioValue == 1 ? 0 : 1;
+          if (lastValue !== value) {
+            console.log(
+              `[GPIO ${pin} - ${name}] State change detected (watch):
+              Previous State: ${lastValue !== null ? lastValue : "initial"}
+              New State: ${value}
+              Timestamp: ${new Date().toISOString()}`
+            );
+            lastValue = value;
+          }
+          callback(err, value);
         });
       },
       unexport: () => {
-        console.log(`[GPIO ${adjustedPin}] Unexporting`);
+        console.log(`[GPIO ${pin}] Unexporting`);
         realGpio.unexport();
       },
       getPin: () => adjustedPin,

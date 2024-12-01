@@ -1,19 +1,22 @@
+// src/RouterSimulator.ts
 import { EventEmitter } from "events";
 import * as readline from "readline";
-import { RouterController } from "./router-control";
+import { RouterController } from "./RouterController/RouterController";
 import { CameraController } from "./camera-controller";
+import { stateManager } from "./config/ConfigManager";
 
 interface SimulatorDependencies {
   router: RouterController;
   camera: CameraController;
 }
 
-export class RouterSimulator {
+export class RouterSimulator extends EventEmitter {
   private rl: readline.Interface;
   private router: RouterController;
   private camera: CameraController;
 
   constructor(dependencies: SimulatorDependencies) {
+    super();
     this.router = dependencies.router;
     this.camera = dependencies.camera;
 
@@ -33,9 +36,13 @@ Router Simulator Commands:
 @ - Deactivate Exit Sensor
 c - Check Camera Connection
 p - Take Test Photo
+s - Show Current State
 q - Quit
 ------------------------
-`);
+    `);
+
+    // Show initial state
+    this.displayCurrentState();
 
     this.rl.on("line", async (input) => {
       try {
@@ -46,58 +53,78 @@ q - Quit
     });
   }
 
+  private displayCurrentState(): void {
+    const state = stateManager.getState();
+    console.log("\nCurrent System State:");
+    console.log("-------------------");
+    console.log(
+      `Sensor 1: ${state.sensor1.active ? "🟢 Active" : "⭕ Inactive"}`
+    );
+    console.log(`Piston: ${state.piston.active ? "🟢 Active" : "⭕ Inactive"}`);
+    console.log(`Riser: ${state.riser.active ? "🟢 Active" : "⭕ Inactive"}`);
+    console.log(`Processing: ${state.isProcessing ? "🟢 Yes" : "⭕ No"}`);
+    console.log(
+      `Camera Connected: ${state.deviceConnected ? "🟢 Yes" : "⭕ No"}`
+    );
+    console.log("-------------------\n");
+  }
+
   private async handleCommand(command: string): Promise<void> {
     try {
       switch (command) {
         case "1":
-          // Access sensor1 through the router's exposed methods
-          this.router.updateSensor1State(1);
-          console.log("🟢 Entry sensor activated");
+          stateManager.setSensor1Active(true);
+          console.log("🟢 Entry sensor activation command sent");
           break;
-        case "2":
-          // Access sensor2 through the router's exposed methods
-          this.router.updateSensor2State(1);
-          console.log("🟢 Exit sensor activated");
-          break;
+
         case "!":
-          this.router.updateSensor1State(0);
-          console.log("⭕ Entry sensor deactivated");
+          stateManager.setSensor1Active(false);
+          console.log("⭕ Entry sensor deactivation command sent");
           break;
-        case "@":
-          this.router.updateSensor2State(0);
-          console.log("⭕ Exit sensor deactivated");
-          break;
+
         case "c":
           const connected = await this.camera.checkDeviceConnection();
+          stateManager.setDeviceConnected(connected);
           console.log(
             connected ? "📱 Camera connected" : "❌ Camera not connected"
           );
           break;
+
         case "p":
           try {
-            this.router.updateSensor1State(0);
-            this.router.updateSensor2State(0);
-            setTimeout(() => {
-              this.router.updateSensor1State(1);
-              this.router.updateSensor2State(1);
-            }, 1000);
+            stateManager.setCapturingImage(true);
+            const filepath = await this.camera.takePhoto();
+            console.log(`📸 Photo taken: ${filepath}`);
+            stateManager.setLastPhotoPath(filepath);
+            stateManager.setCapturingImage(false);
           } catch (error) {
             console.error("❌ Failed to take photo:", error);
+            stateManager.setCapturingImage(false);
           }
           break;
+
+        case "s":
+          this.displayCurrentState();
+          break;
+
         case "q":
+          console.log("Cleaning up and exiting...");
           this.cleanup();
           process.exit(0);
           break;
+
         default:
-          console.log("Unknown command");
+          console.log("❌ Unknown command");
       }
     } catch (error) {
       console.error("Error executing command:", error);
+      // Reset any pending states in case of error
+      stateManager.setCapturingImage(false);
     }
   }
 
   public cleanup(): void {
     this.rl.close();
+    this.removeAllListeners();
   }
 }

@@ -2,17 +2,16 @@ import { EventEmitter } from "events";
 import { IGpio } from "./gpio-factory";
 import {
   DetectionResponse,
-  EjectionSettings,
+  RouterSettings,
   Prediction,
   ClassName,
   PresetSettings,
 } from "./types";
-import { ConfigurationManager } from "./ConfigManager";
+import { ConfigurationManager } from "./config/ConfigManager";
 
 export class EjectionControl extends EventEmitter {
-  private ejectionSolenoid: IGpio;
+  private ejector: IGpio;
   private ejectionTimeout: NodeJS.Timeout | null = null;
-  private config: EjectionSettings;
   private configManager: ConfigurationManager;
 
   constructor(
@@ -21,10 +20,9 @@ export class EjectionControl extends EventEmitter {
     configManager: ConfigurationManager
   ) {
     super();
-    this.ejectionSolenoid = gpioFactory(pin, "out");
+    this.ejector = gpioFactory(pin, "out");
     this.configManager = configManager;
-    this.config = this.configManager.getConfig();
-    this.ejectionSolenoid.writeSync(0);
+    this.ejector.writeSync(0);
     console.log(`[EjectionControl] Initialized with pin ${pin}`);
   }
 
@@ -37,12 +35,12 @@ export class EjectionControl extends EventEmitter {
   }
 
   private isInRegionOfInterest(bbox: number[]): boolean {
-    if (!this.config.advancedSettings.regionOfInterest) {
+    if (!this.getConfig().advancedSettings.regionOfInterest) {
       console.log("[ROI Check] No ROI configured, allowing all regions");
       return true;
     }
 
-    const roi = this.config.advancedSettings.regionOfInterest;
+    const roi = this.getConfig().advancedSettings.regionOfInterest;
     const [x1, y1, x2, y2] = bbox;
     const isInside = !(
       x1 > roi.x + roi.width ||
@@ -59,7 +57,7 @@ export class EjectionControl extends EventEmitter {
 
   private calculateOverlap(predictions: Prediction[]): number {
     if (
-      !this.config.advancedSettings.considerOverlap ||
+      !this.getConfig().advancedSettings.considerOverlap ||
       predictions.length < 2
     ) {
       console.log(
@@ -112,7 +110,7 @@ export class EjectionControl extends EventEmitter {
       const className = pred.class_name as ClassName;
       countByClass[className] = (countByClass[className] || 0) + 1;
 
-      const classConfig = this.config.perClassSettings[className];
+      const classConfig = this.getConfig().perClassSettings[className];
       console.log(
         `[Class Count] ${className}: ${countByClass[className]} (max: ${
           classConfig.maxCount || "unlimited"
@@ -144,27 +142,29 @@ export class EjectionControl extends EventEmitter {
     console.log("[Global Criteria] Checking global ejection criteria");
 
     // Check maximum defects limit
-    if (this.config.globalSettings.maxDefectsBeforeEject) {
+    if (this.getConfig().globalSettings.maxDefectsBeforeEject) {
       console.log(
-        `[Max Defects] Checking max defects: ${validPredictions.length} (max: ${this.config.globalSettings.maxDefectsBeforeEject})`
+        `[Max Defects] Checking max defects: ${validPredictions.length} (max: ${
+          this.getConfig().globalSettings.maxDefectsBeforeEject
+        })`
       );
       if (
         validPredictions.length >=
-        this.config.globalSettings.maxDefectsBeforeEject
+        this.getConfig().globalSettings.maxDefectsBeforeEject
       ) {
         return {
           shouldEject: true,
           reason: "Maximum defect count exceeded",
           details: {
             defectCount: validPredictions.length,
-            threshold: this.config.globalSettings.maxDefectsBeforeEject,
+            threshold: this.getConfig().globalSettings.maxDefectsBeforeEject,
           },
         };
       }
     }
 
     // Check multiple defects requirement
-    if (this.config.globalSettings.requireMultipleDefects) {
+    if (this.getConfig().globalSettings.requireMultipleDefects) {
       console.log(
         `[Multiple Defects] Checking multiple defects requirement (found: ${validPredictions.length})`
       );
@@ -178,29 +178,31 @@ export class EjectionControl extends EventEmitter {
     }
 
     // Check total area
-    if (this.config.globalSettings.minTotalArea) {
+    if (this.getConfig().globalSettings.minTotalArea) {
       const totalArea = validPredictions.reduce(
         (sum, pred) => sum + this.calculateArea(Object.values(pred.bbox)),
         0
       );
       console.log(
-        `[Total Area] Checking total area: ${totalArea} (min: ${this.config.globalSettings.minTotalArea})`
+        `[Total Area] Checking total area: ${totalArea} (min: ${
+          this.getConfig().globalSettings.minTotalArea
+        })`
       );
 
-      if (totalArea >= this.config.globalSettings.minTotalArea) {
+      if (totalArea >= this.getConfig().globalSettings.minTotalArea) {
         return {
           shouldEject: true,
           reason: "Total area threshold exceeded",
           details: {
             totalArea,
-            threshold: this.config.globalSettings.minTotalArea,
+            threshold: this.getConfig().globalSettings.minTotalArea,
           },
         };
       }
     }
 
     // Consider overlap if enabled
-    if (this.config.advancedSettings.considerOverlap) {
+    if (this.getConfig().advancedSettings.considerOverlap) {
       const overlapArea = this.calculateOverlap(validPredictions);
       if (overlapArea > 0) {
         return {
@@ -224,7 +226,7 @@ export class EjectionControl extends EventEmitter {
     // Check if any individual prediction meets its class-specific criteria
     for (const pred of predictions) {
       const className = pred.class_name as ClassName;
-      const classConfig = this.config.perClassSettings[className];
+      const classConfig = this.getConfig().perClassSettings[className];
       const area = this.calculateArea(Object.values(pred.bbox));
 
       console.log(`[Per-Class] Evaluating ${className}:`);
@@ -263,7 +265,8 @@ export class EjectionControl extends EventEmitter {
           className: maxCountCheck.className,
           count: maxCountCheck.count,
           threshold:
-            this.config.perClassSettings[maxCountCheck.className!].maxCount,
+            this.getConfig().perClassSettings[maxCountCheck.className!]
+              .maxCount,
         },
       };
     }
@@ -277,6 +280,7 @@ export class EjectionControl extends EventEmitter {
     details: any;
   } {
     console.log("\n[Ejection Decision] Starting ejection decision process");
+    const config = this.getConfig();
     console.log(
       `[Ejection Decision] Received ${response.data.predictions.length} predictions`
     );
@@ -296,7 +300,7 @@ export class EjectionControl extends EventEmitter {
     );
     const validPredictions = predictions.filter((pred) => {
       const className = pred.class_name as ClassName;
-      const classConfig = this.config.perClassSettings[className];
+      const classConfig = config.perClassSettings[className];
 
       if (!classConfig || !classConfig.enabled) {
         console.log(
@@ -364,8 +368,8 @@ export class EjectionControl extends EventEmitter {
   public async activate(): Promise<void> {
     console.log("[Activation] Starting ejection cycle");
     try {
-      this.ejectionSolenoid.writeSync(1);
-      console.log("[Activation] Solenoid activated");
+      this.ejector.writeSync(1);
+      console.log("[Activation] Piston activated");
       this.emit("ejectionStarted");
 
       if (this.ejectionTimeout) {
@@ -373,14 +377,15 @@ export class EjectionControl extends EventEmitter {
         console.log("[Activation] Cleared existing timeout");
       }
 
+      const config = this.getConfig();
       await new Promise<void>((resolve) => {
         console.log(
-          `[Activation] Setting ejection duration: ${this.config.globalSettings.ejectionDuration}ms`
+          `[Activation] Setting ejection duration: ${config.globalSettings.ejectionDuration}ms`
         );
         this.ejectionTimeout = setTimeout(() => {
           this.deactivate();
           resolve();
-        }, this.config.globalSettings.ejectionDuration);
+        }, config.globalSettings.ejectionDuration);
       });
     } catch (error) {
       console.error("[Activation] Error during activation:", error);
@@ -392,8 +397,8 @@ export class EjectionControl extends EventEmitter {
   private deactivate(): void {
     console.log("[Deactivation] Starting deactivation");
     try {
-      this.ejectionSolenoid.writeSync(0);
-      console.log("[Deactivation] Solenoid deactivated");
+      this.ejector.writeSync(0);
+      console.log("[Deactivation] Piston deactivated");
       this.emit("ejectionComplete");
     } catch (error) {
       console.error("[Deactivation] Error during deactivation:", error);
@@ -405,9 +410,7 @@ export class EjectionControl extends EventEmitter {
     console.log("[Config] Applying preset:", preset);
     try {
       await this.configManager.applyPreset(preset);
-      this.config = this.configManager.getConfig();
-      console.log("[Config] Preset applied successfully");
-      this.emit("configUpdated", this.config);
+      this.emit("configUpdated", this.configManager.getConfig());
     } catch (error) {
       console.error("[Config] Error applying preset:", error);
       this.emit("error", new Error(`Failed to apply preset: ${error}`));
@@ -415,18 +418,14 @@ export class EjectionControl extends EventEmitter {
     }
   }
 
-  public async updateConfig(
-    newConfig: Partial<EjectionSettings>
-  ): Promise<void> {
+  public async updateConfig(settings: Partial<RouterSettings>): Promise<void> {
     console.log(
       "[Config] Updating configuration:",
-      JSON.stringify(newConfig, null, 2)
+      JSON.stringify(settings, null, 2)
     );
     try {
-      await this.configManager.updateConfig(newConfig);
-      this.config = this.configManager.getConfig();
-      console.log("[Config] Configuration updated successfully");
-      this.emit("configUpdated", this.config);
+      await this.configManager.updateConfig(settings);
+      this.emit("configUpdated", this.configManager.getConfig());
     } catch (error) {
       console.error("[Config] Error updating configuration:", error);
       this.emit("error", new Error(`Failed to update config: ${error}`));
@@ -434,8 +433,13 @@ export class EjectionControl extends EventEmitter {
     }
   }
 
-  public getConfig(): EjectionSettings {
-    return { ...this.config };
+  public getEjectionSettings(): RouterSettings {
+    return this.configManager.getConfig();
+  }
+
+  // Helper method to get current config
+  public getConfig(): RouterSettings {
+    return this.configManager.getConfig();
   }
 
   public cleanup(): void {
@@ -444,7 +448,7 @@ export class EjectionControl extends EventEmitter {
       clearTimeout(this.ejectionTimeout);
       console.log("[Cleanup] Cleared ejection timeout");
     }
-    this.ejectionSolenoid.unexport();
-    console.log("[Cleanup] Solenoid unexported");
+    this.ejector.unexport();
+    console.log("[Cleanup] Piston unexported");
   }
 }

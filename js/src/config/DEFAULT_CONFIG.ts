@@ -1,10 +1,14 @@
+import { RouterSettings } from "../types";
+
 // Default ejection configuration
-export const DEFAULT_EJECTION_CONFIG = {
+export const DEFAULT_EJECTION_CONFIG: RouterSettings = {
   globalSettings: {
     ejectionDuration: 1000,
     requireMultipleDefects: false,
     minTotalArea: 100,
     maxDefectsBeforeEject: 5,
+    riserDuration: 3000,
+    pistonDuration: 5000,
   },
   perClassSettings: {
     corner: { enabled: true, minConfidence: 0.5, minArea: 100, maxCount: 3 },
@@ -18,6 +22,19 @@ export const DEFAULT_EJECTION_CONFIG = {
   },
   advancedSettings: {
     considerOverlap: false,
-    regionOfInterest: { x: 0, y: 0, width: 100, height: 100 },
+    regionOfInterest: {
+      x: 0,
+      y: 0,
+      width: 100,
+      height: 100,
+      type: "roi",
+      id: "roi",
+    },
+    exclusionZones: [],
   },
 };
+
+export const SENSOR1_PIN = 20;
+export const PISTON_PIN = 14;
+export const RISER_PIN = 15;
+export const EJECTOR_PIN = 18;

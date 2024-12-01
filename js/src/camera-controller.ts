@@ -22,6 +22,7 @@ export class CameraController extends EventEmitter {
   private photoCheckInterval: number = 100;
   private lastKnownPhoto: string | null = null;
   private deviceStatus: "connected" | "disconnected" | "error" = "disconnected";
+  private monitoringInterval;
 
   constructor(config: Partial<CameraControllerConfig> = {}) {
     super();
@@ -38,25 +39,41 @@ export class CameraController extends EventEmitter {
   private async initialize(): Promise<void> {
     try {
       await fs.mkdir(this.config.photosDir, { recursive: true });
+      // Perform initial device check immediately
+      const initialStatus = await this.checkDeviceConnection();
+      this.deviceStatus = initialStatus ? "connected" : "disconnected";
+      this.emit("deviceStatus", this.deviceStatus);
+
+      // Then start the monitoring interval
       await this.startDeviceMonitoring();
     } catch (error) {
+      this.deviceStatus = "error";
+      this.emit("deviceStatus", "error");
       this.emit("error", new Error("Failed to initialize camera controller"));
     }
   }
 
   private async startDeviceMonitoring(): Promise<void> {
-    setInterval(async () => {
+    // First clear any existing intervals to prevent duplicates
+    if (this.monitoringInterval) {
+      clearInterval(this.monitoringInterval);
+    }
+
+    this.monitoringInterval = setInterval(async () => {
       try {
         const isConnected = await this.checkDeviceConnection();
         const newStatus = isConnected ? "connected" : "disconnected";
 
+        // Only emit if status actually changed
         if (newStatus !== this.deviceStatus) {
           this.deviceStatus = newStatus;
           this.emit("deviceStatus", this.deviceStatus);
         }
       } catch (error) {
-        this.deviceStatus = "error";
-        this.emit("deviceStatus", "error");
+        if (this.deviceStatus !== "error") {
+          this.deviceStatus = "error";
+          this.emit("deviceStatus", "error");
+        }
       }
     }, this.config.connectionCheckInterval);
   }
@@ -64,7 +81,20 @@ export class CameraController extends EventEmitter {
   async checkDeviceConnection(): Promise<boolean> {
     try {
       const { stdout } = await execAsync("adb devices");
-      const isConnected = stdout.includes("device");
+
+      // Split output into lines and remove the first line (which is just "List of devices attached")
+      const lines = stdout.trim().split("\n").slice(1);
+
+      // Check if there are any devices and if they are in "device" state
+      // A properly connected device will show as "<serial>\tdevice"
+      const connectedDevices = lines.filter((line) => {
+        const [_, state] = line.trim().split("\t");
+        return state === "device"; // Only count devices in full "device" state
+      });
+
+      const isConnected = connectedDevices.length > 0;
+      // console.log("IS CAMERA CONNECTED: ", isConnected);
+      // console.log("Connected devices:", connectedDevices);
 
       return isConnected;
     } catch (error) {

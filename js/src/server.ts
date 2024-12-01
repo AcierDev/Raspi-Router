@@ -4,10 +4,11 @@ import http from "http";
 import path from "path";
 import { WebSocket, WebSocketServer } from "ws";
 import { CameraController } from "./camera-controller";
-import { RouterController } from "./router-control";
 import { IGpio } from "./gpio-factory";
-import { LogEntry, EjectionSettings, PresetSettings } from "./types";
+import { LogEntry, RouterSettings, PresetSettings } from "./types";
 import fs from "fs/promises";
+import { RouterController } from "./RouterController/RouterController";
+import { configManager, stateManager } from "./config/ConfigManager";
 
 interface WebSocketMessage {
   type: string;
@@ -20,6 +21,7 @@ export class MonitoringServer {
   public camera: CameraController;
   private connectedClients: Set<WebSocket> = new Set();
   private pingInterval: NodeJS.Timeout | null = null;
+  private connectedClientIds: Map<string, WebSocket> = new Map();
 
   constructor(
     app: express.Application,
@@ -36,142 +38,129 @@ export class MonitoringServer {
     console.log("📡 WebSocket server created with path: /ws");
 
     this.camera = new CameraController();
-    this.router = new RouterController(
-      gpioFactory,
-      this.camera,
-      20,
-      21,
-      14,
-      15
-    );
+    this.router = new RouterController(gpioFactory, this.camera);
 
     this.setupWebSocket();
     this.setupRouterEvents();
+    this.setupStateManagerEvents();
     this.setupExpress(app);
 
-    // Set up ping interval to keep connections alive
     this.pingInterval = setInterval(() => {
       this.wss.clients.forEach((client) => {
         if (client.readyState === WebSocket.OPEN) {
           client.ping();
-          //console.log("❤️ Ping sent to client");
         }
       });
     }, 30000);
   }
 
-  private setupWebSocket(): void {
-    console.log("🔌 Setting up WebSocket handlers...");
+  private async setupWebSocket() {
+    this.wss.on(
+      "connection",
+      async (ws: WebSocket, req: http.IncomingMessage) => {
+        const clientId = req.headers["sec-websocket-key"];
 
-    this.wss.on("listening", () => {
-      console.log("👂 WebSocket server is listening for connections");
-    });
-
-    this.wss.on("connection", (ws: WebSocket, req: http.IncomingMessage) => {
-      console.log(
-        `✨ New WebSocket client connected from ${req.socket.remoteAddress}`
-      );
-      console.log(`📊 Total connected clients: ${this.wss.clients.size}`);
-
-      this.connectedClients.add(ws);
-
-      // Send initial state
-      const initialState = {
-        sensor1: this.router.getSensor1State(),
-        sensor2: this.router.getSensor2State(),
-        solenoid: this.router.getSolenoidState(),
-        deviceConnected: false,
-        lastPhotoPath: null,
-        isCapturingImage: false,
-        ejectionSettings: this.router.getEjectionSettings(),
-      };
-
-      //console.log("📤 Sending initial state:", initialState);
-      ws.send(JSON.stringify(initialState));
-
-      // Handle incoming messages
-      ws.on("message", (data) => {
-        try {
-          const message: WebSocketMessage = JSON.parse(data.toString());
-          //console.log("📥 Received message from client:", message);
-
-          switch (message.type) {
-            case "updateEjectionSettings":
-              this.handleEjectionSettingsUpdate(message.data);
-              break;
-            case "applyEjectionPreset":
-              this.handleEjectionPreset(message.data);
-              break;
-            case "getEjectionSettings":
-              this.sendEjectionSettings(ws);
-              break;
-            default:
-              console.log("📥 Unhandled message type:", message.type);
-          }
-        } catch (error) {
-          console.error("Error processing WebSocket message:", error);
-          ws.send(
-            JSON.stringify({
-              type: "error",
-              data: "Invalid message format",
-            })
-          );
+        // If this client already has a connection, close the old one
+        const existingConnection = this.connectedClientIds.get(clientId);
+        if (existingConnection) {
+          console.log(`Closing existing connection for client ${clientId}`);
+          existingConnection.close(1000, "New connection initiated");
+          this.connectedClients.delete(existingConnection);
+          this.connectedClientIds.delete(clientId);
         }
-      });
 
-      // Handle pong responses
-      ws.on("pong", () => {
-        //console.log("💓 Received pong from client");
-      });
+        // Store new connection
+        this.connectedClientIds.set(clientId, ws);
+        this.connectedClients.add(ws);
 
-      ws.on("close", (code, reason) => {
-        console.log(
-          `🔌 Client disconnected. Code: ${code}, Reason: ${
-            reason || "No reason provided"
-          }`
+        // Send initial state and config
+        const initialState = stateManager.getState();
+        const initialConfig = configManager.getConfig();
+
+        ws.send(
+          JSON.stringify({
+            type: "initialData",
+            data: {
+              state: initialState,
+              config: initialConfig,
+            },
+          })
         );
-        console.log(
-          `📊 Remaining connected clients: ${this.wss.clients.size - 1}`
-        );
-        this.connectedClients.delete(ws);
-      });
 
-      ws.on("error", (error) => {
-        console.error("⚠️ WebSocket error:", error);
-      });
-    });
+        ws.on("message", (data) => {
+          try {
+            const message: WebSocketMessage = JSON.parse(data.toString());
+
+            switch (message.type) {
+              case "updateEjectionSettings":
+                this.handleEjectionSettingsUpdate(message.data);
+                break;
+              case "applyEjectionPreset":
+                this.handleEjectionPreset(message.data);
+                break;
+              case "getEjectionSettings":
+                this.sendEjectionSettings(ws);
+                break;
+              default:
+                console.log("📥 Unhandled message type:", message.type);
+            }
+          } catch (error) {
+            console.error("Error processing WebSocket message:", error);
+            ws.send(
+              JSON.stringify({
+                type: "error",
+                data: "Invalid message format",
+              })
+            );
+          }
+        });
+
+        ws.on("pong", () => {
+          // Pong received, connection is alive
+        });
+
+        ws.on("close", () => {
+          this.connectedClientIds.delete(clientId);
+          this.connectedClients.delete(ws);
+        });
+
+        ws.on("error", (error) => {
+          console.error("⚠️ WebSocket error:", error);
+        });
+      }
+    );
 
     this.wss.on("error", (error) => {
       console.error("🚨 WebSocket server error:", error);
     });
   }
 
+  private setupStateManagerEvents(): void {
+    // Listen for state updates
+    stateManager.on("stateUpdate", (state, source) => {
+      this.broadcast("stateUpdate", state);
+    });
+
+    // Listen for config updates
+    configManager.on("configUpdate", (config) => {
+      this.broadcast("configUpdate", config);
+    });
+  }
+
   private setupExpress(app: express.Application): void {
-    // Serve static files from the public directory
     app.use(express.static(path.join(process.cwd(), "public")));
-
-    // Serve photos
     app.use("/api/photos", express.static(path.join(process.cwd(), "photos")));
-
-    // Handle all other routes - Important for client-side routing
     app.get("*", (req, res) => {
       res.sendFile(path.join(process.cwd(), "public", "index.html"));
     });
   }
 
   private async handleEjectionSettingsUpdate(
-    settings: Partial<EjectionSettings>
+    settings: Partial<RouterSettings>
   ): Promise<void> {
     try {
       await this.router.updateEjectionSettings(settings);
 
-      // Broadcast the new settings to all clients
-      this.broadcast(
-        "ejectionSettingsUpdated",
-        this.router.getEjectionSettings()
-      );
-
-      // Log the update
       const logEntry: LogEntry = {
         timestamp: new Date().toISOString(),
         level: "info",
@@ -193,13 +182,6 @@ export class MonitoringServer {
     try {
       await this.router.applyEjectionPreset(preset);
 
-      // Broadcast the new settings to all clients
-      this.broadcast(
-        "ejectionSettingsUpdated",
-        this.router.getEjectionSettings()
-      );
-
-      // Log the preset application
       const logEntry: LogEntry = {
         timestamp: new Date().toISOString(),
         level: "info",
@@ -218,7 +200,7 @@ export class MonitoringServer {
   }
 
   private sendEjectionSettings(ws: WebSocket): void {
-    const settings = this.router.getEjectionSettings();
+    const settings = configManager.getConfig();
     ws.send(
       JSON.stringify({
         type: "ejectionSettings",
@@ -228,17 +210,12 @@ export class MonitoringServer {
   }
 
   private setupRouterEvents(): void {
-    // Handle state updates
-    this.router.on("stateUpdate", (state) => {
-      this.broadcast("stateUpdate", state);
-    });
-
-    // Handle System logs
+    // Forward system logs
     this.router.on("systemLog", (log: LogEntry) => {
       this.broadcast("systemLog", log);
     });
 
-    // Handle image capture events - now immediately sends the image
+    // Handle image capture events
     this.router.on("imageCaptured", async (imageData) => {
       try {
         const imageBuffer = await fs.readFile(imageData.path);
@@ -248,14 +225,12 @@ export class MonitoringServer {
           mimeType: "image/jpeg",
           timestamp: imageData.timestamp,
           size: imageBuffer.length,
-          analysis: null, // No analysis yet
+          analysis: null,
           storedLocations: null,
         };
 
-        // Send metadata first
         this.broadcast("imageMetadata", metadata);
 
-        // Then send the image buffer
         this.connectedClients.forEach((client) => {
           if (client.readyState === WebSocket.OPEN) {
             client.send(imageBuffer);
@@ -266,10 +241,9 @@ export class MonitoringServer {
       }
     });
 
-    // Handle analysis completion separately
+    // Handle analysis completion
     this.router.on("analysisComplete", (analysisData) => {
       try {
-        // If we have analysis results, broadcast them with normalized format
         if (analysisData.analysis?.predictions) {
           const normalizedPredictions = analysisData.analysis.predictions.map(
             (pred) => ({
@@ -291,7 +265,6 @@ export class MonitoringServer {
             predictions: normalizedPredictions,
             storedLocations: analysisData.storedLocations,
             processingTime: analysisData.processingTime,
-            foo: "five",
           });
         }
       } catch (error) {
@@ -299,7 +272,7 @@ export class MonitoringServer {
       }
     });
 
-    // Handle alerts
+    // Forward alerts
     this.router.on("alert", (alert) => {
       this.broadcast("alert", alert);
     });
@@ -307,7 +280,6 @@ export class MonitoringServer {
 
   private broadcast(type: string, data: any): void {
     const message = JSON.stringify({ type, data });
-    //console.log(`📢 Broadcasting ${type}:`, data);
 
     this.connectedClients.forEach((client) => {
       if (client.readyState === WebSocket.OPEN) {
